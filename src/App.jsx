@@ -1,20 +1,19 @@
-import React, { useState, useRef } from "react";
+import React, { useRef, useState } from "react";
 import {
-  Upload,
+  ArrowRight,
+  BookOpen,
   FileText,
-  Sparkles,
+  Headphones,
   ListChecks,
   MessageCircle,
-  Send,
-  ArrowRight,
-  RotateCcw,
-  BookOpen,
-  Headphones,
-  Play,
   Pause,
+  Play,
+  RotateCcw,
+  Send,
+  Sparkles,
+  Upload,
 } from "lucide-react";
 
-// Mock generated content (no backend — stands in for the AI layer)
 const MOCK = {
   title: "Chapter 6 — Memory & Learning",
   summary: [
@@ -73,7 +72,7 @@ const STEPS = [
 ];
 
 export default function StudyMVP() {
-  const [stage, setStage] = useState("upload"); // upload | study
+  const [stage, setStage] = useState("upload");
   const [tab, setTab] = useState("summary");
   const [fileName, setFileName] = useState("");
   const [loading, setLoading] = useState(false);
@@ -90,9 +89,9 @@ export default function StudyMVP() {
   };
 
   return (
-    <div style={styles.app}>
+    <div className="app-shell" style={styles.app}>
       <style>{css}</style>
-      <header style={styles.header}>
+      <header className="app-header" style={styles.header}>
         <div style={styles.brand}>
           <div style={styles.logoMark}>
             <BookOpen size={18} strokeWidth={2.4} />
@@ -119,13 +118,13 @@ function UploadScreen({ loading, onUpload, fileRef }) {
   const [drag, setDrag] = useState(false);
 
   return (
-    <main style={styles.uploadWrap}>
+    <main className="upload-wrap" style={styles.uploadWrap}>
       <p style={styles.eyebrow}>Upload once · study every way</p>
-      <h1 style={styles.h1}>
+      <h1 className="hero-title" style={styles.h1}>
         Turn any document into a<br />
         <span style={styles.h1accent}>study session.</span>
       </h1>
-      <p style={styles.sub}>
+      <p className="hero-sub" style={styles.sub}>
         Drop in your lecture notes or slides. Get a clean summary, a quiz that
         finds your weak spots, and a tutor that only knows your material.
       </p>
@@ -182,16 +181,16 @@ function UploadScreen({ loading, onUpload, fileRef }) {
 
 function StudyScreen({ tab, setTab, fileName }) {
   return (
-    <main style={styles.studyWrap}>
-      <div style={styles.docHeader}>
+    <main className="study-wrap" style={styles.studyWrap}>
+      <div className="doc-header" style={styles.docHeader}>
         <div style={styles.docChip}>
           <FileText size={14} />
           {fileName}
         </div>
-        <h2 style={styles.docTitle}>{MOCK.title}</h2>
+        <h2 className="doc-title" style={styles.docTitle}>{MOCK.title}</h2>
       </div>
 
-      <nav style={styles.tabs}>
+      <nav className="tabs" style={styles.tabs} aria-label="Study sections">
         {STEPS.map((s) => {
           const Icon = s.icon;
           const active = tab === s.id;
@@ -208,7 +207,7 @@ function StudyScreen({ tab, setTab, fileName }) {
         })}
       </nav>
 
-      <section style={styles.panel}>
+      <section className="panel" style={styles.panel}>
         {tab === "summary" && <SummaryPanel />}
         {tab === "quiz" && <QuizPanel />}
         {tab === "podcast" && <PodcastPanel />}
@@ -338,19 +337,20 @@ function PodcastPanel() {
     if (playing) {
       clearInterval(intervalRef.current);
       setPlaying(false);
-    } else {
-      setPlaying(true);
-      intervalRef.current = setInterval(() => {
-        setElapsed((e) => {
-          if (e >= total) {
-            clearInterval(intervalRef.current);
-            setPlaying(false);
-            return total;
-          }
-          return e + 2;
-        });
-      }, 200);
+      return;
     }
+
+    setPlaying(true);
+    intervalRef.current = setInterval(() => {
+      setElapsed((e) => {
+        if (e >= total) {
+          clearInterval(intervalRef.current);
+          setPlaying(false);
+          return total;
+        }
+        return e + 2;
+      });
+    }, 200);
   };
 
   const activeIdx = transcript.reduce((acc, seg, i) => (elapsed >= toSec(seg.t) ? i : acc), 0);
@@ -358,20 +358,18 @@ function PodcastPanel() {
 
   return (
     <div className="fade">
-      <div style={styles.podHero}>
+      <div className="pod-hero" style={styles.podHero}>
         <div style={styles.podCover}>
           <Headphones size={30} strokeWidth={1.8} />
         </div>
         <div>
           <p style={styles.podKicker}>10-minute episode · 2 hosts</p>
           <h3 style={styles.podTitle}>{MOCK.title}</h3>
-          <p style={styles.podHosts}>
-            {hosts[0]} & {hosts[1]} walk through the chapter
-          </p>
+          <p style={styles.podHosts}>{hosts[0]} & {hosts[1]} walk through the chapter</p>
         </div>
       </div>
 
-      <div style={styles.player}>
+      <div className="player" style={styles.player}>
         <button style={styles.playBtn} onClick={toggle} aria-label={playing ? "Pause" : "Play"}>
           {playing ? <Pause size={20} /> : <Play size={20} style={{ marginLeft: 2 }} />}
         </button>
@@ -394,7 +392,7 @@ function PodcastPanel() {
         </div>
       </div>
 
-      <div style={styles.transcript}>
+      <div className="transcript" style={styles.transcript}>
         <p style={styles.transcriptLabel}>Transcript</p>
         {transcript.map((seg, i) => {
           const active = i === activeIdx;
@@ -445,7 +443,7 @@ function TutorPanel() {
   };
 
   return (
-    <div className="fade" style={styles.tutorWrap}>
+    <div className="fade tutor-wrap" style={styles.tutorWrap}>
       <div style={styles.chatScroll}>
         {msgs.map((m, i) => (
           <div
@@ -485,18 +483,18 @@ const muted = "#6f7a73";
 
 const styles = {
   app: {
-    minHeight: "100vh",
+    minHeight: "100svh",
     background: paper,
     color: ink,
     fontFamily: "'Inter', system-ui, sans-serif",
   },
   header: {
+    width: "min(1200px, calc(100vw - 56px))",
+    margin: "0 auto",
+    padding: "20px 0",
     display: "flex",
     justifyContent: "space-between",
     alignItems: "center",
-    padding: "20px 28px",
-    maxWidth: 760,
-    margin: "0 auto",
   },
   brand: { display: "flex", alignItems: "center", gap: 10 },
   logoMark: {
@@ -522,7 +520,17 @@ const styles = {
     cursor: "pointer",
     fontFamily: "inherit",
   },
-  uploadWrap: { maxWidth: 600, margin: "0 auto", padding: "44px 28px 80px", textAlign: "center" },
+  uploadWrap: {
+    width: "min(1120px, calc(100vw - 56px))",
+    minHeight: "calc(100svh - 92px)",
+    margin: "0 auto",
+    padding: "clamp(36px, 6vw, 92px) 0 80px",
+    textAlign: "center",
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    justifyContent: "center",
+  },
   eyebrow: {
     textTransform: "uppercase",
     letterSpacing: "0.16em",
@@ -533,14 +541,20 @@ const styles = {
   },
   h1: {
     fontFamily: "'Fraunces', Georgia, serif",
-    fontSize: 46,
-    lineHeight: 1.04,
+    fontSize: "clamp(42px, 5vw, 78px)",
+    lineHeight: 1.02,
     fontWeight: 600,
-    letterSpacing: "-0.02em",
-    margin: "0 0 18px",
+    letterSpacing: "-0.035em",
+    margin: "0 0 20px",
   },
   h1accent: { color: moss, fontStyle: "italic" },
-  sub: { fontSize: 16, lineHeight: 1.6, color: muted, maxWidth: 460, margin: "0 auto 36px" },
+  sub: {
+    fontSize: "clamp(16px, 1.35vw, 20px)",
+    lineHeight: 1.6,
+    color: muted,
+    maxWidth: 640,
+    margin: "0 auto 38px",
+  },
   loadingBox: { display: "grid", placeItems: "center", gap: 8 },
   loadingText: { margin: 0, fontWeight: 600, fontSize: 15 },
   loadingSub: { margin: 0, fontSize: 13, color: muted },
@@ -572,12 +586,18 @@ const styles = {
     borderBottom: `1.5px solid ${amber}`,
     paddingBottom: 2,
   },
-  studyWrap: { maxWidth: 680, margin: "0 auto", padding: "12px 28px 80px" },
+  studyWrap: {
+    width: "min(1200px, calc(100vw - 56px))",
+    minHeight: "calc(100svh - 92px)",
+    margin: "0 auto",
+    padding: "clamp(16px, 3vw, 36px) 0 80px",
+  },
   docHeader: { marginBottom: 24 },
   docChip: {
     display: "inline-flex",
     alignItems: "center",
     gap: 7,
+    maxWidth: "100%",
     fontSize: 12.5,
     color: muted,
     background: "#fff",
@@ -585,16 +605,32 @@ const styles = {
     borderRadius: 20,
     padding: "5px 12px",
     marginBottom: 14,
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
   },
   docTitle: {
     fontFamily: "'Fraunces', Georgia, serif",
-    fontSize: 30,
+    fontSize: "clamp(30px, 3.6vw, 52px)",
     fontWeight: 600,
-    letterSpacing: "-0.02em",
+    letterSpacing: "-0.035em",
     margin: 0,
   },
-  tabs: { display: "flex", gap: 6, marginBottom: 22, borderBottom: `1px solid ${line}`, paddingBottom: 0 },
-  panel: { background: "#fff", border: `1px solid ${line}`, borderRadius: 16, padding: "28px 26px" },
+  tabs: {
+    display: "flex",
+    gap: 6,
+    marginBottom: 22,
+    borderBottom: `1px solid ${line}`,
+    paddingBottom: 0,
+    overflowX: "auto",
+  },
+  panel: {
+    background: "#fff",
+    border: `1px solid ${line}`,
+    borderRadius: 18,
+    padding: "clamp(24px, 3.2vw, 44px)",
+    minHeight: "clamp(420px, 58svh, 680px)",
+  },
   panelH: {
     fontFamily: "'Fraunces', Georgia, serif",
     fontSize: 20,
@@ -612,6 +648,7 @@ const styles = {
     marginTop: 8,
     display: "inline-flex",
     alignItems: "center",
+    justifyContent: "center",
     gap: 8,
     background: moss,
     color: "#fff",
@@ -646,7 +683,7 @@ const styles = {
     fontSize: 13,
     fontWeight: 500,
   },
-  tutorWrap: { display: "flex", flexDirection: "column", height: 380 },
+  tutorWrap: { display: "flex", flexDirection: "column", minHeight: 420, height: "calc(58svh - 40px)" },
   chatScroll: { flex: 1, overflowY: "auto", display: "flex", flexDirection: "column", gap: 12, paddingRight: 4 },
   bubble: { maxWidth: "82%", padding: "11px 15px", borderRadius: 14, fontSize: 14.5, lineHeight: 1.5 },
   bubbleTutor: { background: paper, border: `1px solid ${line}`, alignSelf: "flex-start", borderBottomLeftRadius: 4 },
@@ -654,6 +691,7 @@ const styles = {
   inputRow: { display: "flex", gap: 8, marginTop: 14 },
   chatInput: {
     flex: 1,
+    minWidth: 0,
     border: `1px solid ${line}`,
     borderRadius: 10,
     padding: "12px 14px",
@@ -671,6 +709,7 @@ const styles = {
     display: "grid",
     placeItems: "center",
     cursor: "pointer",
+    flexShrink: 0,
   },
   podHero: { display: "flex", gap: 16, alignItems: "center", marginBottom: 24 },
   podCover: {
@@ -721,21 +760,8 @@ const styles = {
     cursor: "pointer",
     flexShrink: 0,
   },
-  track: {
-    position: "relative",
-    height: 6,
-    background: line,
-    borderRadius: 3,
-    cursor: "pointer",
-  },
-  trackFill: {
-    position: "absolute",
-    left: 0,
-    top: 0,
-    height: "100%",
-    background: moss,
-    borderRadius: 3,
-  },
+  track: { position: "relative", height: 6, background: line, borderRadius: 3, cursor: "pointer" },
+  trackFill: { position: "absolute", left: 0, top: 0, height: "100%", background: moss, borderRadius: 3 },
   trackThumb: {
     position: "absolute",
     top: "50%",
@@ -779,13 +805,22 @@ const css = `
 @import url('https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400..600;1,9..144,400..600&family=Inter:wght@400;500;600;700&display=swap');
 
 * { box-sizing: border-box; }
-body { margin: 0; }
+html, body, #root { min-height: 100%; }
+body { margin: 0; overflow-x: hidden; }
+button, input { -webkit-tap-highlight-color: transparent; }
+
+.app-shell {
+  width: 100%;
+  overflow-x: hidden;
+}
 
 .dropzone {
+  width: min(760px, 100%);
+  min-height: clamp(260px, 34vh, 420px);
   background: #fff;
   border: 2px dashed ${line};
-  border-radius: 20px;
-  padding: 48px 24px;
+  border-radius: 24px;
+  padding: clamp(36px, 5vw, 72px) 24px;
   display: grid;
   place-items: center;
   gap: 10px;
@@ -807,11 +842,20 @@ body { margin: 0; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
 .tab {
-  display: inline-flex; align-items: center; gap: 7px;
-  background: transparent; border: none;
-  padding: 10px 16px 13px; margin-bottom: -1px;
-  font-size: 14px; font-weight: 500; color: ${muted};
-  cursor: pointer; font-family: inherit;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-width: max-content;
+  background: transparent;
+  border: none;
+  padding: 10px 16px 13px;
+  margin-bottom: -1px;
+  font-size: 14px;
+  font-weight: 500;
+  color: ${muted};
+  cursor: pointer;
+  font-family: inherit;
   border-bottom: 2px solid transparent;
   transition: color .15s, border-color .15s;
 }
@@ -819,24 +863,37 @@ body { margin: 0; }
 .tab.active { color: ${mossDeep}; border-bottom-color: ${moss}; font-weight: 600; }
 
 .opt {
-  display: flex; align-items: center; gap: 11px;
-  width: 100%; text-align: left;
-  background: ${paper}; border: 1.5px solid ${line};
-  border-radius: 11px; padding: 13px 15px;
-  font-size: 14.5px; color: ${ink}; cursor: pointer;
-  font-family: inherit; transition: border-color .15s, background .15s;
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  width: 100%;
+  text-align: left;
+  background: ${paper};
+  border: 1.5px solid ${line};
+  border-radius: 11px;
+  padding: 13px 15px;
+  font-size: 14.5px;
+  color: ${ink};
+  cursor: pointer;
+  font-family: inherit;
+  transition: border-color .15s, background .15s;
 }
 .opt:hover { border-color: ${moss}; }
 .opt .optDot {
-  width: 16px; height: 16px; border-radius: 50%;
-  border: 2px solid ${line}; flex-shrink: 0; transition: all .15s;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 2px solid ${line};
+  flex-shrink: 0;
+  transition: all .15s;
 }
 .opt.picked { border-color: ${moss}; background: #f0f5f1; }
 .opt.picked .optDot { border-color: ${moss}; background: ${moss}; box-shadow: inset 0 0 0 3px #f0f5f1; }
 .opt:focus-visible { outline: 3px solid ${amber}; outline-offset: 2px; }
 
 .segment {
-  display: flex;
+  display: grid;
+  grid-template-columns: 42px 54px 1fr;
   gap: 12px;
   padding: 9px 8px;
   border-radius: 9px;
@@ -848,11 +905,166 @@ body { margin: 0; }
 .fade { animation: fade .35s ease; }
 @keyframes fade { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
 
-@media (prefers-reduced-motion: reduce) {
-  *, .fade, .dropzone { animation: none !important; transition: none !important; }
+@media (min-width: 900px) {
+  .panel .fade {
+    max-width: 860px;
+  }
+
+  .study-wrap {
+    display: grid !important;
+    grid-template-columns: minmax(220px, 320px) minmax(0, 1fr);
+    grid-template-rows: auto 1fr;
+    column-gap: clamp(28px, 4vw, 56px);
+    align-items: start;
+  }
+
+  .doc-header {
+    grid-column: 1 / -1;
+  }
+
+  .tabs {
+    grid-column: 1;
+    grid-row: 2;
+    display: grid !important;
+    gap: 8px !important;
+    border-bottom: 0 !important;
+    overflow: visible !important;
+    position: sticky;
+    top: 20px;
+  }
+
+  .tab {
+    width: 100%;
+    justify-content: flex-start;
+    border: 1px solid ${line};
+    border-radius: 14px;
+    margin-bottom: 0;
+    padding: 14px 16px;
+    background: #fff;
+  }
+
+  .tab.active {
+    border-color: ${moss};
+    border-bottom-color: ${moss};
+    background: #f0f5f1;
+  }
+
+  .panel {
+    grid-column: 2;
+    grid-row: 2;
+  }
 }
 
-@media (max-width: 560px) {
-  h1 { font-size: 34px !important; }
+@media (max-width: 700px) {
+  .app-header {
+    width: calc(100vw - 32px) !important;
+    padding: 16px 0 !important;
+  }
+
+  .upload-wrap,
+  .study-wrap {
+    width: calc(100vw - 32px) !important;
+    min-height: auto !important;
+    padding-bottom: 40px !important;
+  }
+
+  .upload-wrap {
+    justify-content: flex-start !important;
+    padding-top: 42px !important;
+  }
+
+  .hero-title {
+    font-size: clamp(36px, 11vw, 48px) !important;
+    line-height: 1.05 !important;
+  }
+
+  .hero-title br {
+    display: none;
+  }
+
+  .hero-sub {
+    font-size: 15px !important;
+    margin-bottom: 28px !important;
+  }
+
+  .dropzone {
+    width: 100%;
+    min-height: 220px;
+    border-radius: 18px;
+    padding: 34px 18px;
+  }
+
+  .doc-title {
+    font-size: 30px !important;
+  }
+
+  .tabs {
+    gap: 4px !important;
+    margin-left: -16px !important;
+    margin-right: -16px !important;
+    padding-left: 16px !important;
+    padding-right: 16px !important;
+    scrollbar-width: none;
+  }
+
+  .tabs::-webkit-scrollbar {
+    display: none;
+  }
+
+  .tab {
+    padding: 10px 14px 12px;
+    font-size: 13.5px;
+  }
+
+  .panel {
+    min-height: auto !important;
+    padding: 20px 18px !important;
+    border-radius: 16px !important;
+  }
+
+  .pod-hero,
+  .player {
+    align-items: flex-start !important;
+  }
+
+  .player {
+    gap: 12px !important;
+    padding: 14px !important;
+  }
+
+  .segment {
+    grid-template-columns: 1fr;
+    gap: 3px;
+    padding: 10px 0;
+  }
+
+  .tutor-wrap {
+    min-height: 420px !important;
+    height: 60svh !important;
+  }
+}
+
+@media (max-width: 420px) {
+  .app-header {
+    width: calc(100vw - 24px) !important;
+  }
+
+  .upload-wrap,
+  .study-wrap {
+    width: calc(100vw - 24px) !important;
+  }
+
+  .brandName {
+    font-size: 16px;
+  }
+
+  .sampleBtn,
+  .primaryBtn {
+    width: 100%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, .fade, .dropzone { animation: none !important; transition: none !important; }
 }
 `;
