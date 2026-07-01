@@ -1,0 +1,78 @@
+{
+  "model": "gemini-1.5-flash",
+  "purpose": "Prepare study application data from an uploaded PDF",
+  "source_scope": {
+    "document_scope": "same_uploaded_pdf",
+    "fallback_message": "Please ask a question related to the uploaded PDF."
+  },
+  "response_schema": {
+    "summary": {
+      "shortSummary": "string",
+      "detailedSummary": ["string"],
+      "keyConcepts": [
+        {
+          "term": "string",
+          "explanation": "string",
+          "evidence": "string"
+        }
+      ]
+    },
+    "qaTemplate": {
+      "submitMode": "validate_on_submit",
+      "questions": [
+        {
+          "id": "q1",
+          "question": "string",
+          "answerType": "short_text | multiple_choice | true_false",
+          "options": ["string"],
+          "correctAnswer": "string",
+          "acceptedAnswers": ["string"],
+          "rubric": {
+            "fullCredit": "string",
+            "partialCredit": "string",
+            "noCredit": "string"
+          },
+          "feedbackCorrect": "string",
+          "feedbackIncorrect": "string",
+          "topic": "string",
+          "evidence": "string"
+        }
+      ]
+    },
+    "quiz": {
+      "questions": [
+        {
+          "id": "quiz1",
+          "question": "string",
+          "options": ["string"],
+          "correctOptionIndex": 0,
+          "explanation": "string",
+          "topic": "string",
+          "evidence": "string"
+        }
+      ],
+      "validation": {
+        "passThresholdPercent": 70,
+        "showWeakTopics": true
+      }
+    },
+    "podcastScript": {
+      "title": "string",
+      "durationMinutes": 10,
+      "hosts": ["Host 1", "Host 2"],
+      "segments": [
+        {
+          "timestamp": "mm:ss",
+          "speaker": "string",
+          "line": "string",
+          "topic": "string"
+        }
+      ]
+    },
+    "chatConfiguration": {
+      "documentScope": "same_uploaded_pdf",
+      "fallbackMessage": "Please ask a question related to the uploaded PDF.",
+      "supportedActions": ["explain", "summarise", "quiz", "validate_answers", "revise"]
+    }
+  }
+}
