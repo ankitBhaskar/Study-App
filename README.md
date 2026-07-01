@@ -1,6 +1,6 @@
 # Study App
 
-A React/Vite study MVP that turns an uploaded document into a study workflow. The project now includes a Python FastAPI backend that extracts PDF text and prepares a Gemini-ready payload.
+A React/Vite study MVP that turns an uploaded document into a study workflow. The project includes a Python FastAPI backend that extracts PDF text and prepares a Gemini-ready payload.
 
 ## Current features
 
@@ -11,6 +11,7 @@ A React/Vite study MVP that turns an uploaded document into a study workflow. Th
 - Tutor-style chat interface with mock AI response
 - Python PDF processing backend
 - Gemini-ready payload generation from extracted PDF text
+- Gemini response contract for summary, Q&A, quiz validation, podcast script and PDF-scoped chat configuration
 
 ## Project structure
 
@@ -19,6 +20,7 @@ Study-App/
 ├── backend/
 │   ├── main.py
 │   ├── requirements.txt
+│   ├── gemini_response_contract.json
 │   └── README.md
 ├── src/
 │   ├── App.jsx
@@ -35,11 +37,7 @@ npm install
 npm run dev
 ```
 
-Frontend runs on:
-
-```text
-http://localhost:5173
-```
+Frontend runs on `http://localhost:5173`.
 
 ## Run backend locally
 
@@ -61,26 +59,25 @@ pip install -r requirements.txt
 uvicorn main:app --reload --port 8000
 ```
 
-Backend runs on:
-
-```text
-http://localhost:8000
-```
+Backend runs on `http://localhost:8000`.
 
 ## PDF preparation endpoint
 
-```http
-POST /api/pdf/prepare
-```
+`POST /api/pdf/prepare`
 
 Example:
 
 ```bash
-curl -X POST "http://localhost:8000/api/pdf/prepare" \
-  -F "file=@sample.pdf"
+curl -X POST "http://localhost:8000/api/pdf/prepare" -F "file=@sample.pdf"
 ```
 
 The backend returns extracted text metadata, document chunks and a Gemini-ready payload.
+
+## Gemini contract
+
+The expected Gemini output shape is documented in `backend/gemini_response_contract.json`. It covers summary, Q&A, quiz validation, podcast script and chat configuration fields.
+
+The frontend can use the Q&A and quiz fields to validate submitted answers and show feedback to the user.
 
 ## Build frontend
 
@@ -90,4 +87,4 @@ npm run build
 
 ## Notes
 
-The frontend still uses mock generated study content. The backend is ready to prepare uploaded PDF text for Gemini, but it does not call Gemini directly yet. Add the Gemini SDK or REST integration after confirming the preferred model, prompt structure and output schema.
+The frontend still uses mock generated study content. The backend prepares uploaded PDF text for Gemini, but it does not call Gemini directly yet.
