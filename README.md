@@ -8,9 +8,10 @@ A React/Vite study app that turns an uploaded PDF into a study workflow: Gemini-
 - Real PDF upload → Gemini analysis producing summary, quiz and podcast script
 - Interactive quiz with scoring and weak-topic feedback
 - Podcast player with generated transcript
+- AI podcast audio: two distinct ElevenLabs voices read the generated script
 - Tutor chat answering questions scoped to the uploaded PDF via Gemini
 - "Try it with a sample document" demo mode that works without an API key
-- Configurable Gemini model via the `GEMINI_MODEL` environment variable
+- Configurable Gemini model and ElevenLabs model/voices via environment variables
 
 ## Project structure
 
@@ -36,12 +37,15 @@ The repo is zero-config for Vercel: the Vite frontend is built as static assets 
 
 After importing the repo into Vercel, set the environment variables:
 
-1. Get a Gemini API key at <https://aistudio.google.com/apikey>
+1. Get a Gemini API key at <https://aistudio.google.com/apikey> and an ElevenLabs API key at <https://elevenlabs.io> (Profile → API Keys)
 2. In Vercel: your project → **Settings → Environment Variables**
-   - `GEMINI_API_KEY` — your key (required)
+   - `GEMINI_API_KEY` — required for study content generation
+   - `ELEVENLABS_API_KEY` — required for podcast audio generation
    - `GEMINI_MODEL` — optional, defaults to `gemini-2.5-flash`; change it anytime to switch models
+   - `ELEVENLABS_MODEL` — optional, defaults to `eleven_multilingual_v2`
+   - `ELEVENLABS_VOICE_HOST_A` / `ELEVENLABS_VOICE_HOST_B` — optional voice IDs for the two hosts (default: Rachel and Adam)
 3. **Redeploy** (Deployments → ⋯ → Redeploy) — env var changes only take effect on the next deployment
-4. Verify: open `https://<your-app>.vercel.app/api/health` — it should show `"gemini_key_configured": true`
+4. Verify: open `https://<your-app>.vercel.app/api/health` — it should show `"gemini_key_configured": true` and `"elevenlabs_key_configured": true`
 
 ## Run locally
 
@@ -68,6 +72,7 @@ The dev frontend automatically talks to `http://localhost:8000`; set `VITE_API_U
 
 - `POST /api/pdf/analyze` — upload a PDF, get Gemini-generated study content (title, summary, quiz, podcast script) plus the extracted `document_context` used for tutor chat. Requires `GEMINI_API_KEY`.
 - `POST /api/chat` — ask the tutor a question scoped to the uploaded document (`{document_context, file_name, question, history}`). Requires `GEMINI_API_KEY`.
+- `POST /api/podcast/segment-audio` — turn one transcript segment into speech (`{text, speaker}` where speaker is 0 or 1); returns MP3 audio. Requires `ELEVENLABS_API_KEY`. The frontend calls this once per segment and plays them back-to-back, keeping each response well under Vercel's size limits.
 - `POST /api/pdf/prepare` — extract, clean and chunk PDF text and return a Gemini-ready payload without calling Gemini. No key needed.
 - `GET /api/health` — reports service status, the active Gemini model and whether a key is configured.
 
