@@ -383,6 +383,22 @@ function PodcastPanel({ doc }) {
   const [elapsed, setElapsed] = useState(0);
   const intervalRef = useRef(null);
 
+  // AI audio state: idle → generating → ready (or error)
+  const [audioState, setAudioState] = useState("idle");
+  const [audioUrls, setAudioUrls] = useState([]);
+  const [genProgress, setGenProgress] = useState(0);
+  const [audioError, setAudioError] = useState("");
+  const [playingIdx, setPlayingIdx] = useState(0);
+  const [segProgress, setSegProgress] = useState(0);
+  const audioRef = useRef(null);
+
+  React.useEffect(() => {
+    return () => {
+      audioRef.current?.pause();
+      clearInterval(intervalRef.current);
+    };
+  }, []);
+
   const toSec = (mmss) => {
     const [m, s] = mmss.split(":").map(Number);
     return m * 60 + s;
@@ -396,7 +412,85 @@ function PodcastPanel({ doc }) {
     return `${m}:${String(s).padStart(2, "0")}`;
   };
 
+  const generateAudio = async () => {
+    setAudioState("generating");
+    setAudioError("");
+    setGenProgress(0);
+    clearInterval(intervalRef.current);
+    setPlaying(false);
+    try {
+      const urls = new Array(transcript.length);
+      let next = 0;
+      let done = 0;
+      // ElevenLabs free tier allows 2 concurrent requests.
+      const worker = async () => {
+        while (next < transcript.length) {
+          const i = next++;
+          const seg = transcript[i];
+          const res = await fetch(`${API_BASE}/api/podcast/segment-audio`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ text: seg.line, speaker: seg.who === hosts[0] ? 0 : 1 }),
+          });
+          if (!res.ok) {
+            const data = await res.json().catch(() => null);
+            throw new Error(data?.detail || `The audio service returned an error (${res.status}).`);
+          }
+          const blob = await res.blob();
+          urls[i] = URL.createObjectURL(blob);
+          done += 1;
+          setGenProgress(done);
+        }
+      };
+      await Promise.all([worker(), worker()]);
+      setAudioUrls(urls);
+      setPlayingIdx(0);
+      setSegProgress(0);
+      setAudioState("ready");
+    } catch (err) {
+      setAudioError(
+        err instanceof TypeError ? "Could not reach the audio service. Please try again in a moment." : err.message
+      );
+      setAudioState("error");
+    }
+  };
+
+  const playSegment = (i, urls = audioUrls) => {
+    if (!urls[i]) return;
+    if (!audioRef.current) audioRef.current = new Audio();
+    const a = audioRef.current;
+    a.src = urls[i];
+    a.ontimeupdate = () => setSegProgress(a.duration ? a.currentTime / a.duration : 0);
+    a.onended = () => {
+      if (i + 1 < urls.length) {
+        playSegment(i + 1, urls);
+      } else {
+        setPlaying(false);
+        setPlayingIdx(0);
+        setSegProgress(0);
+      }
+    };
+    a.play();
+    setPlayingIdx(i);
+    setSegProgress(0);
+    setPlaying(true);
+  };
+
   const toggle = () => {
+    if (audioState === "ready") {
+      const a = audioRef.current;
+      if (playing) {
+        a?.pause();
+        setPlaying(false);
+      } else if (a?.src && !a.ended) {
+        a.play();
+        setPlaying(true);
+      } else {
+        playSegment(0);
+      }
+      return;
+    }
+
     if (playing) {
       clearInterval(intervalRef.current);
       setPlaying(false);
@@ -416,8 +510,21 @@ function PodcastPanel({ doc }) {
     }, 200);
   };
 
-  const activeIdx = transcript.reduce((acc, seg, i) => (elapsed >= toSec(seg.t) ? i : acc), 0);
-  const progress = Math.min((elapsed / total) * 100, 100);
+  const audioReady = audioState === "ready";
+  const activeIdx = audioReady
+    ? playingIdx
+    : transcript.reduce((acc, seg, i) => (elapsed >= toSec(seg.t) ? i : acc), 0);
+  const progress = audioReady
+    ? Math.min(((playingIdx + segProgress) / transcript.length) * 100, 100)
+    : Math.min((elapsed / total) * 100, 100);
+
+  const seek = (pct) => {
+    if (audioReady) {
+      playSegment(Math.min(Math.floor(pct * transcript.length), transcript.length - 1));
+    } else {
+      setElapsed(Math.round(pct * total));
+    }
+  };
 
   return (
     <div className="fade">
@@ -432,6 +539,27 @@ function PodcastPanel({ doc }) {
         </div>
       </div>
 
+      <div style={styles.audioBar}>
+        {audioState === "idle" && (
+          <button style={styles.audioBtn} onClick={generateAudio}>
+            <Sparkles size={15} /> Generate AI audio
+          </button>
+        )}
+        {audioState === "generating" && (
+          <span style={styles.audioStatus}>
+            <span className="spinner" style={{ width: 16, height: 16, borderWidth: 2 }} />
+            Generating audio… {genProgress}/{transcript.length}
+          </span>
+        )}
+        {audioState === "ready" && <span style={styles.audioStatus}>AI audio ready — press play.</span>}
+        {audioState === "error" && (
+          <span style={{ ...styles.audioStatus, color: "#b03d2e" }}>
+            {audioError}{" "}
+            <button style={styles.audioRetry} onClick={generateAudio}>Retry</button>
+          </span>
+        )}
+      </div>
+
       <div className="player" style={styles.player}>
         <button style={styles.playBtn} onClick={toggle} aria-label={playing ? "Pause" : "Play"}>
           {playing ? <Pause size={20} /> : <Play size={20} style={{ marginLeft: 2 }} />}
@@ -441,16 +569,24 @@ function PodcastPanel({ doc }) {
             style={styles.track}
             onClick={(e) => {
               const rect = e.currentTarget.getBoundingClientRect();
-              const pct = (e.clientX - rect.left) / rect.width;
-              setElapsed(Math.round(pct * total));
+              seek((e.clientX - rect.left) / rect.width);
             }}
           >
             <div style={{ ...styles.trackFill, width: `${progress}%` }} />
             <div style={{ ...styles.trackThumb, left: `${progress}%` }} />
           </div>
           <div style={styles.timeRow}>
-            <span>{fmt(elapsed)}</span>
-            <span>{duration}</span>
+            {audioReady ? (
+              <>
+                <span>Segment {playingIdx + 1} / {transcript.length}</span>
+                <span>AI audio</span>
+              </>
+            ) : (
+              <>
+                <span>{fmt(elapsed)}</span>
+                <span>{duration}</span>
+              </>
+            )}
           </div>
         </div>
       </div>
@@ -464,9 +600,9 @@ function PodcastPanel({ doc }) {
               key={i}
               className="segment"
               style={{ opacity: active ? 1 : 0.45 }}
-              onClick={() => setElapsed(toSec(seg.t))}
+              onClick={() => (audioReady ? playSegment(i) : setElapsed(toSec(seg.t)))}
             >
-              <span style={styles.segTime}>{seg.t}</span>
+              <span style={styles.segTime}>{audioReady ? `#${i + 1}` : seg.t}</span>
               <span style={{ ...styles.segWho, color: seg.who === hosts[0] ? moss : amber }}>
                 {seg.who}
               </span>
@@ -849,6 +985,39 @@ const styles = {
     lineHeight: 1.15,
   },
   podHosts: { fontSize: 13.5, color: muted, margin: 0 },
+  audioBar: { marginBottom: 16, minHeight: 34, display: "flex", alignItems: "center" },
+  audioBtn: {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 7,
+    background: "#fff",
+    border: `1.5px solid ${moss}`,
+    color: mossDeep,
+    borderRadius: 10,
+    padding: "8px 16px",
+    fontSize: 13.5,
+    fontWeight: 600,
+    cursor: "pointer",
+    fontFamily: "inherit",
+  },
+  audioStatus: {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 9,
+    fontSize: 13.5,
+    color: muted,
+  },
+  audioRetry: {
+    background: "transparent",
+    border: "none",
+    color: mossDeep,
+    fontWeight: 600,
+    fontSize: 13.5,
+    cursor: "pointer",
+    fontFamily: "inherit",
+    textDecoration: "underline",
+    padding: 0,
+  },
   player: {
     display: "flex",
     alignItems: "center",

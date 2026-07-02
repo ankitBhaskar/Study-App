@@ -11,6 +11,7 @@ import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 from pydantic import BaseModel
 from pypdf import PdfReader
 
@@ -26,6 +27,13 @@ MAX_GEMINI_CONTEXT_CHARS = 200_000
 GEMINI_API_BASE = os.getenv("GEMINI_API_BASE", "https://generativelanguage.googleapis.com/v1beta")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 GEMINI_TIMEOUT_SECONDS = 55.0
+ELEVENLABS_API_BASE = os.getenv("ELEVENLABS_API_BASE", "https://api.elevenlabs.io/v1")
+ELEVENLABS_MODEL = os.getenv("ELEVENLABS_MODEL", "eleven_multilingual_v2")
+# Premade ElevenLabs voices: Rachel (host A) and Adam (host B).
+ELEVENLABS_VOICE_HOST_A = os.getenv("ELEVENLABS_VOICE_HOST_A", "21m00Tcm4TlvDq8ikWAM")
+ELEVENLABS_VOICE_HOST_B = os.getenv("ELEVENLABS_VOICE_HOST_B", "pNInz6obpgDQGcFmaJgB")
+ELEVENLABS_TIMEOUT_SECONDS = 55.0
+MAX_SEGMENT_TEXT_CHARS = 1_000
 
 app = FastAPI(
     title=APP_NAME,
@@ -119,8 +127,17 @@ class ChatResponse(BaseModel):
     answer: str
 
 
+class SegmentAudioRequest(BaseModel):
+    text: str
+    speaker: int = 0
+
+
 def get_gemini_api_key() -> str | None:
     return os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+
+
+def get_elevenlabs_api_key() -> str | None:
+    return os.getenv("ELEVENLABS_API_KEY")
 
 
 def clean_pdf_text(raw_text: str) -> str:
@@ -408,6 +425,8 @@ def health() -> dict[str, Any]:
         "service": APP_NAME,
         "gemini_model": GEMINI_MODEL,
         "gemini_key_configured": bool(get_gemini_api_key()),
+        "elevenlabs_model": ELEVENLABS_MODEL,
+        "elevenlabs_key_configured": bool(get_elevenlabs_api_key()),
     }
 
 
@@ -494,3 +513,50 @@ async def chat(request: ChatRequest) -> ChatResponse:
 
     answer = await call_gemini(system_instruction, contents, json_response=False)
     return ChatResponse(answer=answer.strip())
+
+
+@app.post("/api/podcast/segment-audio")
+async def podcast_segment_audio(request: SegmentAudioRequest) -> Response:
+    api_key = get_elevenlabs_api_key()
+    if not api_key:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "ElevenLabs API key is not configured. Add ELEVENLABS_API_KEY in your Vercel project settings "
+                "(Settings → Environment Variables) and redeploy, or set it in a local .env file."
+            ),
+        )
+
+    text = request.text.strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Segment text must not be empty.")
+    if len(text) > MAX_SEGMENT_TEXT_CHARS:
+        raise HTTPException(status_code=400, detail="Segment text is too long for audio generation.")
+
+    voice_id = ELEVENLABS_VOICE_HOST_A if request.speaker == 0 else ELEVENLABS_VOICE_HOST_B
+    url = f"{ELEVENLABS_API_BASE}/text-to-speech/{voice_id}"
+
+    async with httpx.AsyncClient(timeout=ELEVENLABS_TIMEOUT_SECONDS) as client:
+        try:
+            response = await client.post(
+                url,
+                params={"output_format": "mp3_44100_128"},
+                headers={"xi-api-key": api_key},
+                json={
+                    "text": text,
+                    "model_id": ELEVENLABS_MODEL,
+                    "voice_settings": {"stability": 0.5, "similarity_boost": 0.75},
+                },
+            )
+        except httpx.HTTPError as exc:
+            raise HTTPException(status_code=502, detail=f"Could not reach the ElevenLabs API: {exc}") from exc
+
+    if response.status_code != 200:
+        try:
+            detail = response.json()["detail"]
+            message = detail.get("message") if isinstance(detail, dict) else str(detail)
+        except Exception:
+            message = response.text[:300]
+        raise HTTPException(status_code=502, detail=f"ElevenLabs API error ({response.status_code}): {message}")
+
+    return Response(content=response.content, media_type="audio/mpeg")
