@@ -1,15 +1,28 @@
 # Study App Backend
 
-Python FastAPI backend for preparing uploaded PDFs for Gemini or another LLM.
+Python FastAPI backend that extracts uploaded PDF text and calls Gemini to generate study content.
 
 ## What it does
 
-- Accepts a PDF upload at `POST /api/pdf/prepare`
-- Extracts readable text using `pypdf`
-- Cleans PDF extraction artefacts such as excess whitespace and line breaks
-- Splits long document text into overlapping chunks
-- Returns a Gemini-ready request payload
-- Does not call Gemini directly yet, so no API key is required for this step
+- Accepts a PDF upload at `POST /api/pdf/analyze`, extracts text with `pypdf`, sends it to Gemini and returns a title, summary points, quiz questions and a two-host podcast script
+- Serves a document-scoped tutor chat at `POST /api/chat` (uses the `document_id` returned by analyze)
+- Still exposes `POST /api/pdf/prepare` for extraction/chunking without calling Gemini (no key needed)
+- `GET /health` reports whether a Gemini key is configured
+
+## Configure the API key
+
+Get a Gemini API key at <https://aistudio.google.com/apikey>, then either:
+
+```bash
+export GEMINI_API_KEY="your-key-here"
+```
+
+or copy `.env.example` to `.env` in this directory and fill it in (loaded automatically on startup).
+
+Optional environment variables:
+
+- `GEMINI_MODEL` — defaults to `gemini-2.5-flash`
+- `GEMINI_API_BASE` — defaults to the official Generative Language API endpoint
 
 ## Run locally
 
@@ -34,23 +47,24 @@ uvicorn main:app --reload --port 8000
 ## Test the API
 
 ```bash
-curl -X POST "http://localhost:8000/api/pdf/prepare" \
+curl -X POST "http://localhost:8000/api/pdf/analyze" \
   -F "file=@sample.pdf"
 ```
 
 ## Response shape
 
-The endpoint returns:
+`POST /api/pdf/analyze` returns:
 
-- `file_name`
-- `page_count`
-- `char_count`
-- `word_count`
-- `preview`
-- `chunks`
-- `gemini_payload`
+- `document_id` — pass this to `/api/chat` for tutor questions
+- `file_name`, `page_count`
+- `title`
+- `summary` — list of key-point strings
+- `quiz` — list of `{q, options, answer, topic, explanation}`
+- `podcast` — `{duration, hosts, transcript: [{t, who, line}]}`
 
-The `gemini_payload` can be sent to Gemini after you add the Gemini SDK or REST call.
+`POST /api/chat` accepts `{document_id, question, history: [{role, text}]}` and returns `{answer}`.
+
+Uploaded documents are stored in memory only; after a backend restart the frontend needs to re-upload the PDF before chatting.
 
 ## Important note
 

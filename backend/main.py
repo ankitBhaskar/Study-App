@@ -1,19 +1,30 @@
 from __future__ import annotations
 
 import io
+import json
+import os
 import re
+import uuid
 from dataclasses import dataclass
 from typing import Any
 
+import httpx
+from dotenv import load_dotenv
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from pypdf import PdfReader
 
+load_dotenv()
+
 APP_NAME = "Study App PDF Processing API"
 MAX_FILE_SIZE_BYTES = 20 * 1024 * 1024
 DEFAULT_CHUNK_SIZE = 6_000
 DEFAULT_CHUNK_OVERLAP = 600
+MAX_GEMINI_CONTEXT_CHARS = 350_000
+GEMINI_API_BASE = os.getenv("GEMINI_API_BASE", "https://generativelanguage.googleapis.com/v1beta")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+GEMINI_TIMEOUT_SECONDS = 180.0
 
 app = FastAPI(
     title=APP_NAME,
@@ -57,6 +68,66 @@ class PdfProcessingResponse(BaseModel):
 class ExtractedPdf:
     page_count: int
     text: str
+
+
+@dataclass(frozen=True)
+class StoredDocument:
+    file_name: str
+    text: str
+
+
+# In-memory store of extracted documents so the tutor chat can stay scoped to
+# the uploaded PDF. Documents live for the lifetime of the server process.
+DOCUMENT_STORE: dict[str, StoredDocument] = {}
+
+
+class QuizQuestion(BaseModel):
+    q: str
+    options: list[str]
+    answer: int
+    topic: str = "General"
+    explanation: str = ""
+
+
+class PodcastSegment(BaseModel):
+    t: str
+    who: str
+    line: str
+
+
+class Podcast(BaseModel):
+    duration: str
+    hosts: list[str]
+    transcript: list[PodcastSegment]
+
+
+class StudyAnalysisResponse(BaseModel):
+    document_id: str
+    file_name: str
+    page_count: int
+    title: str
+    summary: list[str]
+    quiz: list[QuizQuestion]
+    podcast: Podcast
+
+
+class ChatTurn(BaseModel):
+    role: str
+    text: str
+
+
+class ChatRequest(BaseModel):
+    document_id: str
+    question: str
+    history: list[ChatTurn] = []
+
+
+class ChatResponse(BaseModel):
+    answer: str
+
+
+def get_gemini_api_key() -> str | None:
+    return os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
 
 
 def clean_pdf_text(raw_text: str) -> str:
@@ -136,7 +207,7 @@ def build_gemini_payload(file_name: str, chunks: list[PdfChunk]) -> GeminiPayloa
     )
 
     return GeminiPayload(
-        model="gemini-1.5-flash",
+        model=GEMINI_MODEL,
         instruction=instruction,
         contents=[
             {
@@ -161,14 +232,165 @@ def build_gemini_payload(file_name: str, chunks: list[PdfChunk]) -> GeminiPayloa
     )
 
 
-@app.get("/health")
-def health() -> dict[str, str]:
-    return {"status": "ok", "service": APP_NAME}
+async def call_gemini(system_instruction: str, contents: list[dict[str, Any]], *, json_response: bool = True) -> str:
+    api_key = get_gemini_api_key()
+    if not api_key:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Gemini API key is not configured. Set the GEMINI_API_KEY environment variable "
+                "(or add it to backend/.env) and restart the backend."
+            ),
+        )
+
+    generation_config: dict[str, Any] = {
+        "temperature": 0.3,
+        "topP": 0.9,
+        "maxOutputTokens": 16384,
+    }
+    if json_response:
+        generation_config["responseMimeType"] = "application/json"
+
+    body = {
+        "systemInstruction": {"parts": [{"text": system_instruction}]},
+        "contents": contents,
+        "generationConfig": generation_config,
+    }
+    url = f"{GEMINI_API_BASE}/models/{GEMINI_MODEL}:generateContent"
+
+    async with httpx.AsyncClient(timeout=GEMINI_TIMEOUT_SECONDS) as client:
+        try:
+            response = await client.post(url, headers={"x-goog-api-key": api_key}, json=body)
+        except httpx.HTTPError as exc:
+            raise HTTPException(status_code=502, detail=f"Could not reach the Gemini API: {exc}") from exc
+
+    if response.status_code != 200:
+        try:
+            message = response.json()["error"]["message"]
+        except Exception:
+            message = response.text[:500]
+        raise HTTPException(status_code=502, detail=f"Gemini API error ({response.status_code}): {message}")
+
+    data = response.json()
+    try:
+        parts = data["candidates"][0]["content"]["parts"]
+    except (KeyError, IndexError):
+        raise HTTPException(status_code=502, detail="Gemini returned an unexpected response shape.")
+
+    text = "".join(part.get("text", "") for part in parts)
+    if not text.strip():
+        raise HTTPException(status_code=502, detail="Gemini returned an empty response. The request may have been blocked.")
+    return text
 
 
-@app.post("/api/pdf/prepare", response_model=PdfProcessingResponse)
-async def prepare_pdf(file: UploadFile = File(...)) -> PdfProcessingResponse:
-    if file.content_type not in {"application/pdf", "application/x-pdf"}:
+def parse_json_text(text: str) -> dict[str, Any]:
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+        cleaned = re.sub(r"\s*```$", "", cleaned)
+    try:
+        parsed = json.loads(cleaned)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=502, detail="Gemini did not return valid JSON study content.") from exc
+    if not isinstance(parsed, dict):
+        raise HTTPException(status_code=502, detail="Gemini returned JSON that is not an object.")
+    return parsed
+
+
+STUDY_SYSTEM_INSTRUCTION = """You are an expert study assistant. Use ONLY the uploaded document content provided by the user.
+Create study material and return a single JSON object with EXACTLY this shape (no markdown, no extra keys):
+{
+  "title": "short document title, e.g. chapter name",
+  "summary": ["4 to 6 key-point strings covering the document"],
+  "quiz": {
+    "questions": [
+      {
+        "question": "string",
+        "options": ["exactly 4 answer options"],
+        "correctOptionIndex": 0,
+        "explanation": "why the answer is correct",
+        "topic": "short topic label"
+      }
+    ]
+  },
+  "podcastScript": {
+    "title": "episode title",
+    "durationMinutes": 10,
+    "hosts": ["Maya", "Theo"],
+    "segments": [
+      {"timestamp": "0:00", "speaker": "Maya", "line": "spoken line"}
+    ]
+  }
+}
+Create 3 to 5 quiz questions. Create 8 to 12 podcast segments as a natural two-host conversation walking through the document,
+with timestamps spread between 0:00 and 9:30 in mm:ss format. Everything must be grounded in the document content."""
+
+
+def normalise_study_content(raw: dict[str, Any], file_name: str) -> tuple[str, list[str], list[QuizQuestion], Podcast]:
+    title = str(raw.get("title") or file_name)
+
+    summary_raw = raw.get("summary")
+    if isinstance(summary_raw, dict):
+        summary_raw = summary_raw.get("detailedSummary") or [summary_raw.get("shortSummary", "")]
+    summary = [str(point) for point in summary_raw or [] if str(point).strip()]
+    if not summary:
+        raise HTTPException(status_code=502, detail="Gemini response did not include a usable summary.")
+
+    quiz_raw = raw.get("quiz") or {}
+    questions_raw = quiz_raw.get("questions") if isinstance(quiz_raw, dict) else quiz_raw
+    quiz: list[QuizQuestion] = []
+    for item in questions_raw or []:
+        if not isinstance(item, dict):
+            continue
+        options = [str(opt) for opt in item.get("options") or []]
+        try:
+            answer = int(item.get("correctOptionIndex", item.get("answer", 0)))
+        except (TypeError, ValueError):
+            continue
+        question_text = str(item.get("question") or item.get("q") or "").strip()
+        if not question_text or len(options) < 2 or not 0 <= answer < len(options):
+            continue
+        quiz.append(
+            QuizQuestion(
+                q=question_text,
+                options=options,
+                answer=answer,
+                topic=str(item.get("topic") or "General"),
+                explanation=str(item.get("explanation") or ""),
+            )
+        )
+    if not quiz:
+        raise HTTPException(status_code=502, detail="Gemini response did not include usable quiz questions.")
+
+    podcast_raw = raw.get("podcastScript") or {}
+    hosts = [str(host) for host in podcast_raw.get("hosts") or []] or ["Maya", "Theo"]
+    segments: list[PodcastSegment] = []
+    for seg in podcast_raw.get("segments") or []:
+        if not isinstance(seg, dict):
+            continue
+        line = str(seg.get("line") or "").strip()
+        if not line:
+            continue
+        timestamp = str(seg.get("timestamp") or seg.get("t") or "0:00")
+        if not re.fullmatch(r"\d{1,2}:\d{2}", timestamp):
+            timestamp = "0:00"
+        segments.append(PodcastSegment(t=timestamp, who=str(seg.get("speaker") or seg.get("who") or hosts[0]), line=line))
+    if not segments:
+        raise HTTPException(status_code=502, detail="Gemini response did not include a usable podcast script.")
+
+    try:
+        duration_minutes = int(podcast_raw.get("durationMinutes") or 10)
+    except (TypeError, ValueError):
+        duration_minutes = 10
+    podcast = Podcast(duration=f"{duration_minutes}:00", hosts=hosts[:2], transcript=segments)
+
+    return title, summary, quiz, podcast
+
+
+async def read_pdf_upload(file: UploadFile) -> ExtractedPdf:
+    is_pdf_type = file.content_type in {"application/pdf", "application/x-pdf"}
+    is_pdf_name = (file.filename or "").lower().endswith(".pdf")
+    if not (is_pdf_type or is_pdf_name):
         raise HTTPException(status_code=400, detail="Only PDF uploads are supported.")
 
     file_bytes = await file.read()
@@ -183,7 +405,22 @@ async def prepare_pdf(file: UploadFile = File(...)) -> PdfProcessingResponse:
             status_code=422,
             detail="No readable text was found. This may be a scanned PDF and may need OCR before Gemini processing.",
         )
+    return extracted
 
+
+@app.get("/health")
+def health() -> dict[str, Any]:
+    return {
+        "status": "ok",
+        "service": APP_NAME,
+        "gemini_model": GEMINI_MODEL,
+        "gemini_key_configured": bool(get_gemini_api_key()),
+    }
+
+
+@app.post("/api/pdf/prepare", response_model=PdfProcessingResponse)
+async def prepare_pdf(file: UploadFile = File(...)) -> PdfProcessingResponse:
+    extracted = await read_pdf_upload(file)
     chunks = chunk_text(extracted.text)
     payload = build_gemini_payload(file.filename or "uploaded-document.pdf", chunks)
     words = re.findall(r"\b\w+\b", extracted.text)
@@ -197,3 +434,76 @@ async def prepare_pdf(file: UploadFile = File(...)) -> PdfProcessingResponse:
         chunks=chunks,
         gemini_payload=payload,
     )
+
+
+@app.post("/api/pdf/analyze", response_model=StudyAnalysisResponse)
+async def analyze_pdf(file: UploadFile = File(...)) -> StudyAnalysisResponse:
+    extracted = await read_pdf_upload(file)
+    file_name = file.filename or "uploaded-document.pdf"
+    context = extracted.text[:MAX_GEMINI_CONTEXT_CHARS]
+
+    contents = [
+        {
+            "role": "user",
+            "parts": [
+                {
+                    "text": (
+                        f"File name: {file_name}\n\n"
+                        "Extracted PDF content:\n\n"
+                        f"{context}"
+                    )
+                }
+            ],
+        }
+    ]
+
+    raw_text = await call_gemini(STUDY_SYSTEM_INSTRUCTION, contents, json_response=True)
+    raw = parse_json_text(raw_text)
+    title, summary, quiz, podcast = normalise_study_content(raw, file_name)
+
+    document_id = uuid.uuid4().hex
+    DOCUMENT_STORE[document_id] = StoredDocument(file_name=file_name, text=context)
+
+    return StudyAnalysisResponse(
+        document_id=document_id,
+        file_name=file_name,
+        page_count=extracted.page_count,
+        title=title,
+        summary=summary,
+        quiz=quiz,
+        podcast=podcast,
+    )
+
+
+@app.post("/api/chat", response_model=ChatResponse)
+async def chat(request: ChatRequest) -> ChatResponse:
+    document = DOCUMENT_STORE.get(request.document_id)
+    if document is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Document not found. It may have expired after a backend restart — please upload the PDF again.",
+        )
+
+    question = request.question.strip()
+    if not question:
+        raise HTTPException(status_code=400, detail="Question must not be empty.")
+
+    system_instruction = (
+        "You are a friendly study tutor. Answer questions using ONLY the uploaded document below. "
+        "If a question cannot be answered from the document, reply: "
+        "'Please ask a question related to the uploaded PDF.' Keep answers concise and clear.\n\n"
+        f"File name: {document.file_name}\n\n"
+        "Document content:\n\n"
+        f"{document.text}"
+    )
+
+    contents: list[dict[str, Any]] = []
+    for turn in request.history[-20:]:
+        role = "user" if turn.role == "user" else "model"
+        text = turn.text.strip()
+        if text:
+            contents.append({"role": role, "parts": [{"text": text}]})
+    contents.append({"role": "user", "parts": [{"text": question}]})
+
+    answer = await call_gemini(system_instruction, contents, json_response=False)
+    return ChatResponse(answer=answer.strip())

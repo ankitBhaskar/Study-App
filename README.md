@@ -5,12 +5,12 @@ A React/Vite study MVP that turns an uploaded document into a study workflow. Th
 ## Current features
 
 - Responsive document upload screen with drag-and-drop interaction
-- Generated study summary view
+- Real PDF upload → Gemini analysis producing summary, quiz and podcast script
 - Interactive quiz with scoring and weak-topic feedback
-- Simulated 10-minute podcast player and transcript
-- Tutor-style chat interface with mock AI response
-- Python PDF processing backend
-- Gemini-ready payload generation from extracted PDF text
+- Podcast player with generated transcript
+- Tutor chat answering questions scoped to the uploaded PDF via Gemini
+- "Try it with a sample document" demo mode that works without a backend or API key
+- Python FastAPI backend for PDF extraction, chunking and Gemini calls
 - Gemini response contract for summary, Q&A, quiz validation, podcast script and PDF-scoped chat configuration
 
 ## Project structure
@@ -39,6 +39,22 @@ npm run dev
 
 Frontend runs on `http://localhost:5173`.
 
+## Configure the Gemini API key
+
+The backend needs a Gemini API key to generate study content. Get one at
+<https://aistudio.google.com/apikey>, then either export it:
+
+```bash
+export GEMINI_API_KEY="your-key-here"
+```
+
+or copy `backend/.env.example` to `backend/.env` and fill it in. The default
+model is `gemini-2.5-flash`; override it with the `GEMINI_MODEL` environment
+variable if needed.
+
+Without a key the app still starts — uploads return a clear "key not
+configured" error, and the sample-document demo mode keeps working.
+
 ## Run backend locally
 
 ```bash
@@ -61,17 +77,18 @@ uvicorn main:app --reload --port 8000
 
 Backend runs on `http://localhost:8000`.
 
-## PDF preparation endpoint
+## API endpoints
 
-`POST /api/pdf/prepare`
+- `POST /api/pdf/analyze` — upload a PDF, get Gemini-generated study content (title, summary, quiz, podcast script) plus a `document_id` for chat. Requires `GEMINI_API_KEY`.
+- `POST /api/chat` — ask the tutor a question scoped to an uploaded document (`{document_id, question, history}`). Requires `GEMINI_API_KEY`.
+- `POST /api/pdf/prepare` — extract, clean and chunk PDF text and return a Gemini-ready payload without calling Gemini. No key needed.
+- `GET /health` — reports service status and whether a Gemini key is configured.
 
 Example:
 
 ```bash
-curl -X POST "http://localhost:8000/api/pdf/prepare" -F "file=@sample.pdf"
+curl -X POST "http://localhost:8000/api/pdf/analyze" -F "file=@sample.pdf"
 ```
-
-The backend returns extracted text metadata, document chunks and a Gemini-ready payload.
 
 ## Gemini contract
 
@@ -87,4 +104,6 @@ npm run build
 
 ## Notes
 
-The frontend still uses mock generated study content. The backend prepares uploaded PDF text for Gemini, but it does not call Gemini directly yet.
+- The frontend calls the backend at `http://localhost:8000` by default; set `VITE_API_URL` to point elsewhere.
+- Uploaded documents are held in backend memory for tutor chat, so chat context is lost when the backend restarts.
+- Scanned (image-only) PDFs need OCR first; the backend returns a clear error for them.

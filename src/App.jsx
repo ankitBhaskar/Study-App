@@ -14,6 +14,8 @@ import {
   Upload,
 } from "lucide-react";
 
+const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:8000";
+
 const MOCK = {
   title: "Chapter 6 — Memory & Learning",
   summary: [
@@ -76,16 +78,57 @@ export default function StudyMVP() {
   const [tab, setTab] = useState("summary");
   const [fileName, setFileName] = useState("");
   const [loading, setLoading] = useState(false);
+  const [doc, setDoc] = useState(null);
+  const [error, setError] = useState("");
   const fileRef = useRef(null);
 
-  const startUpload = (name) => {
-    setFileName(name || "lecture-notes.pdf");
+  const startUpload = async (file) => {
+    setError("");
+
+    if (!file) {
+      // Sample mode: show bundled demo content without hitting the backend.
+      setFileName("psychology-ch6.pdf");
+      setLoading(true);
+      setTimeout(() => {
+        setDoc({ ...MOCK, documentId: null });
+        setLoading(false);
+        setStage("study");
+        setTab("summary");
+      }, 1400);
+      return;
+    }
+
+    setFileName(file.name);
     setLoading(true);
-    setTimeout(() => {
-      setLoading(false);
+    try {
+      const form = new FormData();
+      form.append("file", file);
+      const res = await fetch(`${API_BASE}/api/pdf/analyze`, {
+        method: "POST",
+        body: form,
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok) {
+        throw new Error(data?.detail || `The study service returned an error (${res.status}).`);
+      }
+      setDoc({
+        title: data.title,
+        summary: data.summary,
+        quiz: data.quiz,
+        podcast: data.podcast,
+        documentId: data.document_id,
+      });
       setStage("study");
       setTab("summary");
-    }, 1400);
+    } catch (err) {
+      setError(
+        err instanceof TypeError
+          ? `Could not reach the backend at ${API_BASE}. Is it running? (uvicorn main:app --port 8000)`
+          : err.message
+      );
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
@@ -106,15 +149,15 @@ export default function StudyMVP() {
       </header>
 
       {stage === "upload" ? (
-        <UploadScreen loading={loading} onUpload={startUpload} fileRef={fileRef} />
+        <UploadScreen loading={loading} onUpload={startUpload} fileRef={fileRef} error={error} />
       ) : (
-        <StudyScreen tab={tab} setTab={setTab} fileName={fileName} />
+        <StudyScreen tab={tab} setTab={setTab} fileName={fileName} doc={doc} />
       )}
     </div>
   );
 }
 
-function UploadScreen({ loading, onUpload, fileRef }) {
+function UploadScreen({ loading, onUpload, fileRef, error }) {
   const [drag, setDrag] = useState(false);
 
   return (
@@ -140,7 +183,7 @@ function UploadScreen({ loading, onUpload, fileRef }) {
           e.preventDefault();
           setDrag(false);
           const f = e.dataTransfer.files?.[0];
-          onUpload(f?.name);
+          if (f) onUpload(f);
         }}
         onClick={() => !loading && fileRef.current?.click()}
         role="button"
@@ -149,8 +192,13 @@ function UploadScreen({ loading, onUpload, fileRef }) {
         <input
           ref={fileRef}
           type="file"
+          accept=".pdf,application/pdf"
           hidden
-          onChange={(e) => onUpload(e.target.files?.[0]?.name)}
+          onChange={(e) => {
+            const f = e.target.files?.[0];
+            if (f) onUpload(f);
+            e.target.value = "";
+          }}
         />
         {loading ? (
           <div style={styles.loadingBox}>
@@ -169,8 +217,10 @@ function UploadScreen({ loading, onUpload, fileRef }) {
         )}
       </div>
 
+      {!loading && error && <p style={styles.errorText}>{error}</p>}
+
       {!loading && (
-        <button style={styles.sampleBtn} onClick={() => onUpload("psychology-ch6.pdf")}>
+        <button style={styles.sampleBtn} onClick={() => onUpload(null)}>
           <FileText size={14} /> Try it with a sample document
           <ArrowRight size={14} />
         </button>
@@ -179,7 +229,7 @@ function UploadScreen({ loading, onUpload, fileRef }) {
   );
 }
 
-function StudyScreen({ tab, setTab, fileName }) {
+function StudyScreen({ tab, setTab, fileName, doc }) {
   return (
     <main className="study-wrap" style={styles.studyWrap}>
       <div className="doc-header" style={styles.docHeader}>
@@ -187,7 +237,7 @@ function StudyScreen({ tab, setTab, fileName }) {
           <FileText size={14} />
           {fileName}
         </div>
-        <h2 className="doc-title" style={styles.docTitle}>{MOCK.title}</h2>
+        <h2 className="doc-title" style={styles.docTitle}>{doc.title}</h2>
       </div>
 
       <nav className="tabs" style={styles.tabs} aria-label="Study sections">
@@ -208,21 +258,21 @@ function StudyScreen({ tab, setTab, fileName }) {
       </nav>
 
       <section className="panel" style={styles.panel}>
-        {tab === "summary" && <SummaryPanel />}
-        {tab === "quiz" && <QuizPanel />}
-        {tab === "podcast" && <PodcastPanel />}
-        {tab === "tutor" && <TutorPanel />}
+        {tab === "summary" && <SummaryPanel doc={doc} />}
+        {tab === "quiz" && <QuizPanel doc={doc} />}
+        {tab === "podcast" && <PodcastPanel doc={doc} />}
+        {tab === "tutor" && <TutorPanel documentId={doc.documentId} />}
       </section>
     </main>
   );
 }
 
-function SummaryPanel() {
+function SummaryPanel({ doc }) {
   return (
     <div className="fade">
       <h3 style={styles.panelH}>Key points</h3>
       <ul style={styles.summaryList}>
-        {MOCK.summary.map((point, i) => (
+        {doc.summary.map((point, i) => (
           <li key={i} style={styles.summaryItem}>
             <span style={styles.summaryNum}>{String(i + 1).padStart(2, "0")}</span>
             <span>{point}</span>
@@ -233,22 +283,23 @@ function SummaryPanel() {
   );
 }
 
-function QuizPanel() {
+function QuizPanel({ doc }) {
   const [answers, setAnswers] = useState({});
   const [submitted, setSubmitted] = useState(false);
 
-  const score = MOCK.quiz.reduce((n, q, i) => (answers[i] === q.answer ? n + 1 : n), 0);
-  const weak = MOCK.quiz.filter((q, i) => answers[i] !== q.answer).map((q) => q.topic);
+  const quiz = doc.quiz;
+  const score = quiz.reduce((n, q, i) => (answers[i] === q.answer ? n + 1 : n), 0);
+  const weak = quiz.filter((q, i) => answers[i] !== q.answer).map((q) => q.topic);
 
   if (submitted) {
     return (
       <div className="fade" style={styles.resultBox}>
         <div style={styles.scoreRing}>
           <span style={styles.scoreNum}>{score}</span>
-          <span style={styles.scoreOf}>/ {MOCK.quiz.length}</span>
+          <span style={styles.scoreOf}>/ {quiz.length}</span>
         </div>
         <h3 style={styles.panelH}>
-          {score === MOCK.quiz.length ? "Perfect run." : "Here's where to focus."}
+          {score === quiz.length ? "Perfect run." : "Here's where to focus."}
         </h3>
         {weak.length > 0 ? (
           <>
@@ -278,7 +329,7 @@ function QuizPanel() {
   return (
     <div className="fade">
       <h3 style={styles.panelH}>Quick quiz</h3>
-      {MOCK.quiz.map((q, qi) => (
+      {quiz.map((q, qi) => (
         <div key={qi} style={styles.qBlock}>
           <p style={styles.qText}>
             <span style={styles.qIndex}>Q{qi + 1}</span>
@@ -304,9 +355,9 @@ function QuizPanel() {
       <button
         style={{
           ...styles.primaryBtn,
-          opacity: Object.keys(answers).length === MOCK.quiz.length ? 1 : 0.45,
+          opacity: Object.keys(answers).length === quiz.length ? 1 : 0.45,
         }}
-        disabled={Object.keys(answers).length !== MOCK.quiz.length}
+        disabled={Object.keys(answers).length !== quiz.length}
         onClick={() => setSubmitted(true)}
       >
         Check answers <ArrowRight size={15} />
@@ -315,17 +366,18 @@ function QuizPanel() {
   );
 }
 
-function PodcastPanel() {
-  const { duration, hosts, transcript } = MOCK.podcast;
+function PodcastPanel({ doc }) {
+  const { duration, hosts, transcript } = doc.podcast;
   const [playing, setPlaying] = useState(false);
   const [elapsed, setElapsed] = useState(0);
-  const total = 600;
   const intervalRef = useRef(null);
 
   const toSec = (mmss) => {
     const [m, s] = mmss.split(":").map(Number);
     return m * 60 + s;
   };
+
+  const total = Math.max(toSec(duration) || 600, toSec(transcript[transcript.length - 1]?.t || "0:00") + 30);
 
   const fmt = (sec) => {
     const m = Math.floor(sec / 60);
@@ -363,9 +415,9 @@ function PodcastPanel() {
           <Headphones size={30} strokeWidth={1.8} />
         </div>
         <div>
-          <p style={styles.podKicker}>10-minute episode · 2 hosts</p>
-          <h3 style={styles.podTitle}>{MOCK.title}</h3>
-          <p style={styles.podHosts}>{hosts[0]} & {hosts[1]} walk through the chapter</p>
+          <p style={styles.podKicker}>{duration.split(":")[0]}-minute episode · {hosts.length} hosts</p>
+          <h3 style={styles.podTitle}>{doc.title}</h3>
+          <p style={styles.podHosts}>{hosts.join(" & ")} walk through the chapter</p>
         </div>
       </div>
 
@@ -416,7 +468,7 @@ function PodcastPanel() {
   );
 }
 
-function TutorPanel() {
+function TutorPanel({ documentId }) {
   const [msgs, setMsgs] = useState([
     {
       role: "tutor",
@@ -424,22 +476,50 @@ function TutorPanel() {
     },
   ]);
   const [input, setInput] = useState("");
+  const [busy, setBusy] = useState(false);
 
-  const send = () => {
-    if (!input.trim()) return;
+  const send = async () => {
+    if (!input.trim() || busy) return;
     const userText = input.trim();
+    const history = msgs.slice(1).map((m) => ({ role: m.role, text: m.text }));
     setMsgs((m) => [...m, { role: "user", text: userText }]);
     setInput("");
-    setTimeout(() => {
+
+    if (!documentId) {
+      // Sample mode: no uploaded document to ground answers in.
+      setTimeout(() => {
+        setMsgs((m) => [
+          ...m,
+          {
+            role: "tutor",
+            text:
+              "Based on your notes: spaced repetition works because each review happens just as you're about to forget, which forces effortful retrieval and strengthens the memory. (This is a demo response — upload your own PDF to chat with the AI tutor.)",
+          },
+        ]);
+      }, 700);
+      return;
+    }
+
+    setBusy(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ document_id: documentId, question: userText, history }),
+      });
+      const data = await res.json().catch(() => null);
+      const answer = res.ok
+        ? data.answer
+        : data?.detail || `The tutor is unavailable right now (error ${res.status}).`;
+      setMsgs((m) => [...m, { role: "tutor", text: answer }]);
+    } catch {
       setMsgs((m) => [
         ...m,
-        {
-          role: "tutor",
-          text:
-            "Based on your notes: spaced repetition works because each review happens just as you're about to forget, which forces effortful retrieval and strengthens the memory. (This is a demo response — wire up your AI layer here.)",
-        },
+        { role: "tutor", text: "Could not reach the tutor service. Is the backend running?" },
       ]);
-    }, 700);
+    } finally {
+      setBusy(false);
+    }
   };
 
   return (
@@ -456,6 +536,9 @@ function TutorPanel() {
             {m.text}
           </div>
         ))}
+        {busy && (
+          <div style={{ ...styles.bubble, ...styles.bubbleTutor, opacity: 0.6 }}>Thinking…</div>
+        )}
       </div>
       <div style={styles.inputRow}>
         <input
@@ -465,7 +548,7 @@ function TutorPanel() {
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && send()}
         />
-        <button style={styles.sendBtn} onClick={send}>
+        <button style={{ ...styles.sendBtn, opacity: busy ? 0.5 : 1 }} onClick={send} disabled={busy}>
           <Send size={16} />
         </button>
       </div>
@@ -571,6 +654,18 @@ const styles = {
   },
   dropTitle: { margin: 0, fontWeight: 600, fontSize: 17 },
   dropSub: { margin: 0, fontSize: 13.5, color: muted },
+  errorText: {
+    marginTop: 18,
+    marginBottom: 0,
+    maxWidth: 640,
+    fontSize: 14,
+    lineHeight: 1.5,
+    color: "#b03d2e",
+    background: "#fdeeea",
+    border: "1px solid #f2cfc5",
+    borderRadius: 10,
+    padding: "10px 16px",
+  },
   sampleBtn: {
     marginTop: 22,
     display: "inline-flex",
