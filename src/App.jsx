@@ -14,7 +14,12 @@ import {
   Upload,
 } from "lucide-react";
 
-const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:8000";
+// In production the API is served by Vercel functions on the same origin;
+// in local dev the FastAPI server runs separately on port 8000.
+const API_BASE = import.meta.env.VITE_API_URL || (import.meta.env.DEV ? "http://localhost:8000" : "");
+
+// Vercel serverless functions reject bodies over ~4.5 MB.
+const MAX_UPLOAD_BYTES = 4 * 1024 * 1024;
 
 const MOCK = {
   title: "Chapter 6 — Memory & Learning",
@@ -90,11 +95,16 @@ export default function StudyMVP() {
       setFileName("psychology-ch6.pdf");
       setLoading(true);
       setTimeout(() => {
-        setDoc({ ...MOCK, documentId: null });
+        setDoc({ ...MOCK, documentContext: null });
         setLoading(false);
         setStage("study");
         setTab("summary");
       }, 1400);
+      return;
+    }
+
+    if (file.size > MAX_UPLOAD_BYTES) {
+      setError("PDF is too large. Maximum supported size is 4 MB.");
       return;
     }
 
@@ -116,14 +126,15 @@ export default function StudyMVP() {
         summary: data.summary,
         quiz: data.quiz,
         podcast: data.podcast,
-        documentId: data.document_id,
+        documentContext: data.document_context,
+        docFileName: data.file_name,
       });
       setStage("study");
       setTab("summary");
     } catch (err) {
       setError(
         err instanceof TypeError
-          ? `Could not reach the backend at ${API_BASE}. Is it running? (uvicorn main:app --port 8000)`
+          ? "Could not reach the study service. Please try again in a moment."
           : err.message
       );
     } finally {
@@ -261,7 +272,7 @@ function StudyScreen({ tab, setTab, fileName, doc }) {
         {tab === "summary" && <SummaryPanel doc={doc} />}
         {tab === "quiz" && <QuizPanel doc={doc} />}
         {tab === "podcast" && <PodcastPanel doc={doc} />}
-        {tab === "tutor" && <TutorPanel documentId={doc.documentId} />}
+        {tab === "tutor" && <TutorPanel documentContext={doc.documentContext} docFileName={doc.docFileName} />}
       </section>
     </main>
   );
@@ -468,7 +479,7 @@ function PodcastPanel({ doc }) {
   );
 }
 
-function TutorPanel({ documentId }) {
+function TutorPanel({ documentContext, docFileName }) {
   const [msgs, setMsgs] = useState([
     {
       role: "tutor",
@@ -485,7 +496,7 @@ function TutorPanel({ documentId }) {
     setMsgs((m) => [...m, { role: "user", text: userText }]);
     setInput("");
 
-    if (!documentId) {
+    if (!documentContext) {
       // Sample mode: no uploaded document to ground answers in.
       setTimeout(() => {
         setMsgs((m) => [
@@ -505,7 +516,12 @@ function TutorPanel({ documentId }) {
       const res = await fetch(`${API_BASE}/api/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ document_id: documentId, question: userText, history }),
+        body: JSON.stringify({
+          document_context: documentContext,
+          file_name: docFileName,
+          question: userText,
+          history,
+        }),
       });
       const data = await res.json().catch(() => null);
       const answer = res.ok
@@ -515,7 +531,7 @@ function TutorPanel({ documentId }) {
     } catch {
       setMsgs((m) => [
         ...m,
-        { role: "tutor", text: "Could not reach the tutor service. Is the backend running?" },
+        { role: "tutor", text: "Could not reach the tutor service. Please try again in a moment." },
       ]);
     } finally {
       setBusy(false);

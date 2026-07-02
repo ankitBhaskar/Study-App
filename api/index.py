@@ -4,7 +4,6 @@ import io
 import json
 import os
 import re
-import uuid
 from dataclasses import dataclass
 from typing import Any
 
@@ -17,19 +16,21 @@ from pypdf import PdfReader
 
 load_dotenv()
 
-APP_NAME = "Study App PDF Processing API"
-MAX_FILE_SIZE_BYTES = 20 * 1024 * 1024
+APP_NAME = "Study App API"
+# Vercel serverless functions reject request bodies over ~4.5 MB, so the
+# upload limit must stay below that even though Gemini could handle more.
+MAX_FILE_SIZE_BYTES = 4 * 1024 * 1024
 DEFAULT_CHUNK_SIZE = 6_000
 DEFAULT_CHUNK_OVERLAP = 600
-MAX_GEMINI_CONTEXT_CHARS = 350_000
+MAX_GEMINI_CONTEXT_CHARS = 200_000
 GEMINI_API_BASE = os.getenv("GEMINI_API_BASE", "https://generativelanguage.googleapis.com/v1beta")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
-GEMINI_TIMEOUT_SECONDS = 180.0
+GEMINI_TIMEOUT_SECONDS = 55.0
 
 app = FastAPI(
     title=APP_NAME,
-    version="0.1.0",
-    description="Extracts, cleans and chunks PDF text so it is ready to pass into Gemini or another LLM.",
+    version="0.2.0",
+    description="Extracts PDF text and generates study content (summary, quiz, podcast script, tutor chat) with Gemini.",
 )
 
 app.add_middleware(
@@ -70,17 +71,6 @@ class ExtractedPdf:
     text: str
 
 
-@dataclass(frozen=True)
-class StoredDocument:
-    file_name: str
-    text: str
-
-
-# In-memory store of extracted documents so the tutor chat can stay scoped to
-# the uploaded PDF. Documents live for the lifetime of the server process.
-DOCUMENT_STORE: dict[str, StoredDocument] = {}
-
-
 class QuizQuestion(BaseModel):
     q: str
     options: list[str]
@@ -102,13 +92,15 @@ class Podcast(BaseModel):
 
 
 class StudyAnalysisResponse(BaseModel):
-    document_id: str
     file_name: str
     page_count: int
     title: str
     summary: list[str]
     quiz: list[QuizQuestion]
     podcast: Podcast
+    # Serverless functions keep no state between requests, so the client
+    # holds the extracted document text and sends it back with chat calls.
+    document_context: str
 
 
 class ChatTurn(BaseModel):
@@ -117,8 +109,9 @@ class ChatTurn(BaseModel):
 
 
 class ChatRequest(BaseModel):
-    document_id: str
+    document_context: str
     question: str
+    file_name: str = "uploaded-document.pdf"
     history: list[ChatTurn] = []
 
 
@@ -238,8 +231,8 @@ async def call_gemini(system_instruction: str, contents: list[dict[str, Any]], *
         raise HTTPException(
             status_code=503,
             detail=(
-                "Gemini API key is not configured. Set the GEMINI_API_KEY environment variable "
-                "(or add it to backend/.env) and restart the backend."
+                "Gemini API key is not configured. Add GEMINI_API_KEY in your Vercel project settings "
+                "(Settings → Environment Variables) and redeploy, or set it in a local .env file."
             ),
         )
 
@@ -397,7 +390,7 @@ async def read_pdf_upload(file: UploadFile) -> ExtractedPdf:
     if not file_bytes:
         raise HTTPException(status_code=400, detail="The uploaded PDF is empty.")
     if len(file_bytes) > MAX_FILE_SIZE_BYTES:
-        raise HTTPException(status_code=413, detail="PDF is too large. Maximum supported size is 20 MB.")
+        raise HTTPException(status_code=413, detail="PDF is too large. Maximum supported size is 4 MB.")
 
     extracted = extract_pdf_text(file_bytes)
     if not extracted.text:
@@ -408,7 +401,7 @@ async def read_pdf_upload(file: UploadFile) -> ExtractedPdf:
     return extracted
 
 
-@app.get("/health")
+@app.get("/api/health")
 def health() -> dict[str, Any]:
     return {
         "status": "ok",
@@ -461,28 +454,22 @@ async def analyze_pdf(file: UploadFile = File(...)) -> StudyAnalysisResponse:
     raw = parse_json_text(raw_text)
     title, summary, quiz, podcast = normalise_study_content(raw, file_name)
 
-    document_id = uuid.uuid4().hex
-    DOCUMENT_STORE[document_id] = StoredDocument(file_name=file_name, text=context)
-
     return StudyAnalysisResponse(
-        document_id=document_id,
         file_name=file_name,
         page_count=extracted.page_count,
         title=title,
         summary=summary,
         quiz=quiz,
         podcast=podcast,
+        document_context=context,
     )
 
 
 @app.post("/api/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest) -> ChatResponse:
-    document = DOCUMENT_STORE.get(request.document_id)
-    if document is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Document not found. It may have expired after a backend restart — please upload the PDF again.",
-        )
+    context = request.document_context.strip()[:MAX_GEMINI_CONTEXT_CHARS]
+    if not context:
+        raise HTTPException(status_code=400, detail="Document context is missing. Please upload the PDF again.")
 
     question = request.question.strip()
     if not question:
@@ -492,9 +479,9 @@ async def chat(request: ChatRequest) -> ChatResponse:
         "You are a friendly study tutor. Answer questions using ONLY the uploaded document below. "
         "If a question cannot be answered from the document, reply: "
         "'Please ask a question related to the uploaded PDF.' Keep answers concise and clear.\n\n"
-        f"File name: {document.file_name}\n\n"
+        f"File name: {request.file_name}\n\n"
         "Document content:\n\n"
-        f"{document.text}"
+        f"{context}"
     )
 
     contents: list[dict[str, Any]] = []
