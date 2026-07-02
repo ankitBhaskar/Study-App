@@ -2,6 +2,7 @@ import React, { useRef, useState } from "react";
 import {
   ArrowRight,
   BookOpen,
+  Clock,
   FileText,
   Headphones,
   ListChecks,
@@ -12,6 +13,7 @@ import {
   Send,
   Sparkles,
   Upload,
+  X,
 } from "lucide-react";
 
 // In production the API is served by Vercel functions on the same origin;
@@ -20,6 +22,41 @@ const API_BASE = import.meta.env.VITE_API_URL || (import.meta.env.DEV ? "http://
 
 // Vercel serverless functions reject bodies over ~4.5 MB.
 const MAX_UPLOAD_BYTES = 4 * 1024 * 1024;
+
+// Document history is stored in the browser only (localStorage) — there is
+// no account system, so this is per-device, not synced across devices.
+const HISTORY_KEY = "study-app:history";
+const HISTORY_LIMIT = 8;
+
+function loadHistory() {
+  try {
+    const raw = localStorage.getItem(HISTORY_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveHistory(entries) {
+  // Drop the oldest entries first if storage quota is exceeded (e.g. large
+  // document_context strings), rather than losing the whole history.
+  let toStore = entries;
+  while (toStore.length > 0) {
+    try {
+      localStorage.setItem(HISTORY_KEY, JSON.stringify(toStore));
+      return toStore;
+    } catch {
+      toStore = toStore.slice(0, -1);
+    }
+  }
+  try {
+    localStorage.removeItem(HISTORY_KEY);
+  } catch {
+    // ignore — storage may be unavailable (e.g. private browsing)
+  }
+  return [];
+}
 
 const MOCK = {
   title: "Chapter 6 — Memory & Learning",
@@ -85,7 +122,30 @@ export default function StudyMVP() {
   const [loading, setLoading] = useState(false);
   const [doc, setDoc] = useState(null);
   const [error, setError] = useState("");
+  const [history, setHistory] = useState(() => loadHistory());
   const fileRef = useRef(null);
+
+  const openHistoryEntry = (entry) => {
+    setError("");
+    setFileName(entry.fileName);
+    setDoc({
+      title: entry.title,
+      summary: entry.summary,
+      quiz: entry.quiz,
+      podcast: entry.podcast,
+      documentContext: entry.documentContext,
+      docFileName: entry.fileName,
+    });
+    setStage("study");
+    setTab("summary");
+  };
+
+  const deleteHistoryEntry = (id, e) => {
+    e.stopPropagation();
+    setHistory((prev) => saveHistory(prev.filter((h) => h.id !== id)));
+  };
+
+  const clearAllHistory = () => setHistory(saveHistory([]));
 
   const startUpload = async (file) => {
     setError("");
@@ -129,6 +189,21 @@ export default function StudyMVP() {
         documentContext: data.document_context,
         docFileName: data.file_name,
       });
+      setHistory((prev) =>
+        saveHistory([
+          {
+            id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+            createdAt: new Date().toISOString(),
+            fileName: data.file_name,
+            title: data.title,
+            summary: data.summary,
+            quiz: data.quiz,
+            podcast: data.podcast,
+            documentContext: data.document_context,
+          },
+          ...prev,
+        ].slice(0, HISTORY_LIMIT))
+      );
       setStage("study");
       setTab("summary");
     } catch (err) {
@@ -160,7 +235,16 @@ export default function StudyMVP() {
       </header>
 
       {stage === "upload" ? (
-        <UploadScreen loading={loading} onUpload={startUpload} fileRef={fileRef} error={error} />
+        <UploadScreen
+          loading={loading}
+          onUpload={startUpload}
+          fileRef={fileRef}
+          error={error}
+          history={history}
+          onOpenHistory={openHistoryEntry}
+          onDeleteHistory={deleteHistoryEntry}
+          onClearHistory={clearAllHistory}
+        />
       ) : (
         <StudyScreen tab={tab} setTab={setTab} fileName={fileName} doc={doc} />
       )}
@@ -168,7 +252,15 @@ export default function StudyMVP() {
   );
 }
 
-function UploadScreen({ loading, onUpload, fileRef, error }) {
+function formatHistoryDate(iso) {
+  const d = new Date(iso);
+  const sameDay = d.toDateString() === new Date().toDateString();
+  return sameDay
+    ? d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })
+    : d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
+function UploadScreen({ loading, onUpload, fileRef, error, history, onOpenHistory, onDeleteHistory, onClearHistory }) {
   const [drag, setDrag] = useState(false);
 
   return (
@@ -235,6 +327,38 @@ function UploadScreen({ loading, onUpload, fileRef, error }) {
           <FileText size={14} /> Try it with a sample document
           <ArrowRight size={14} />
         </button>
+      )}
+
+      {!loading && history.length > 0 && (
+        <div style={styles.historyBox}>
+          <div style={styles.historyHead}>
+            <span style={styles.historyTitle}>
+              <Clock size={13} /> Recent documents
+            </span>
+            <button style={styles.historyClear} onClick={onClearHistory}>
+              Clear all
+            </button>
+          </div>
+          <div style={styles.historyList}>
+            {history.map((entry) => (
+              <div key={entry.id} className="history-item" style={styles.historyItem} onClick={() => onOpenHistory(entry)}>
+                <FileText size={15} style={{ color: muted, flexShrink: 0 }} />
+                <div style={styles.historyMeta}>
+                  <p style={styles.historyDocTitle}>{entry.title}</p>
+                  <p style={styles.historyFileName}>{entry.fileName}</p>
+                </div>
+                <span style={styles.historyDate}>{formatHistoryDate(entry.createdAt)}</span>
+                <button
+                  style={styles.historyDelete}
+                  onClick={(e) => onDeleteHistory(entry.id, e)}
+                  aria-label={`Remove ${entry.fileName} from history`}
+                >
+                  <X size={14} />
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
       )}
     </main>
   );
@@ -833,6 +957,75 @@ const styles = {
     borderBottom: `1.5px solid ${amber}`,
     paddingBottom: 2,
   },
+  historyBox: { marginTop: 40, width: "min(560px, 100%)", textAlign: "left" },
+  historyHead: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginBottom: 10,
+  },
+  historyTitle: {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 6,
+    fontSize: 12,
+    fontWeight: 600,
+    textTransform: "uppercase",
+    letterSpacing: "0.1em",
+    color: muted,
+  },
+  historyClear: {
+    background: "transparent",
+    border: "none",
+    color: muted,
+    fontSize: 12.5,
+    cursor: "pointer",
+    fontFamily: "inherit",
+    textDecoration: "underline",
+    padding: 0,
+  },
+  historyList: { display: "grid", gap: 6 },
+  historyItem: {
+    display: "flex",
+    alignItems: "center",
+    gap: 10,
+    background: "#fff",
+    border: `1px solid ${line}`,
+    borderRadius: 12,
+    padding: "10px 12px",
+    cursor: "pointer",
+    transition: "border-color .15s",
+  },
+  historyMeta: { flex: 1, minWidth: 0 },
+  historyDocTitle: {
+    margin: 0,
+    fontSize: 13.5,
+    fontWeight: 600,
+    color: ink,
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+  },
+  historyFileName: {
+    margin: 0,
+    fontSize: 12,
+    color: muted,
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+  },
+  historyDate: { fontSize: 11.5, color: muted, flexShrink: 0, fontVariantNumeric: "tabular-nums" },
+  historyDelete: {
+    background: "transparent",
+    border: "none",
+    color: muted,
+    cursor: "pointer",
+    padding: 4,
+    display: "grid",
+    placeItems: "center",
+    flexShrink: 0,
+    borderRadius: 6,
+  },
   studyWrap: {
     width: "min(1200px, calc(100vw - 56px))",
     minHeight: "calc(100svh - 92px)",
@@ -1181,6 +1374,9 @@ button, input { -webkit-tap-highlight-color: transparent; }
   transition: opacity .25s, background .15s;
 }
 .segment:hover { background: ${paper}; }
+
+.history-item:hover { border-color: ${moss}; }
+.history-item button:hover { background: ${paper}; color: ${ink}; }
 
 .fade { animation: fade .35s ease; }
 @keyframes fade { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
