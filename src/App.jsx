@@ -16,12 +16,7 @@ import {
   Upload,
   X,
 } from "lucide-react";
-import {
-  createUserWithEmailAndPassword,
-  onAuthStateChanged,
-  signInWithEmailAndPassword,
-  signOut,
-} from "firebase/auth";
+import { onAuthStateChanged, signInWithEmailAndPassword, signOut } from "firebase/auth";
 import { auth } from "./firebase";
 
 // In production the API is served by Vercel functions on the same origin;
@@ -92,10 +87,6 @@ function friendlyAuthError(code) {
   switch (code) {
     case "auth/invalid-email":
       return "That doesn't look like a valid email address.";
-    case "auth/email-already-in-use":
-      return "An account with that email already exists — try signing in instead.";
-    case "auth/weak-password":
-      return "Password must be at least 6 characters.";
     case "auth/invalid-credential":
     case "auth/wrong-password":
     case "auth/user-not-found":
@@ -107,8 +98,7 @@ function friendlyAuthError(code) {
   }
 }
 
-function AuthScreen() {
-  const [mode, setMode] = useState("login");
+function AuthScreen({ blockedMessage }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
@@ -119,11 +109,7 @@ function AuthScreen() {
     setError("");
     setBusy(true);
     try {
-      if (mode === "signup") {
-        await createUserWithEmailAndPassword(auth, email, password);
-      } else {
-        await signInWithEmailAndPassword(auth, email, password);
-      }
+      await signInWithEmailAndPassword(auth, email, password);
     } catch (err) {
       setError(friendlyAuthError(err.code));
     } finally {
@@ -139,10 +125,10 @@ function AuthScreen() {
         <span style={styles.h1accent}>study session.</span>
       </h1>
       <p className="hero-sub" style={styles.sub}>
-        Sign in to upload documents and keep a history you can revisit anytime.
+        This app is invite-only. Sign in with your account to continue.
       </p>
       <form onSubmit={submit} style={styles.authForm}>
-        <h2 style={styles.authTitle}>{mode === "login" ? "Sign in" : "Create your account"}</h2>
+        <h2 style={styles.authTitle}>Sign in</h2>
         <input
           style={styles.chatInput}
           type="email"
@@ -157,28 +143,18 @@ function AuthScreen() {
           type="password"
           required
           minLength={6}
-          placeholder="Password (min 6 characters)"
-          autoComplete={mode === "login" ? "current-password" : "new-password"}
+          placeholder="Password"
+          autoComplete="current-password"
           value={password}
           onChange={(e) => setPassword(e.target.value)}
         />
-        {error && <p style={styles.errorText}>{error}</p>}
+        {(error || blockedMessage) && <p style={styles.errorText}>{error || blockedMessage}</p>}
         <button
           type="submit"
           style={{ ...styles.primaryBtn, width: "100%", justifyContent: "center", opacity: busy ? 0.6 : 1 }}
           disabled={busy}
         >
-          {busy ? "Please wait…" : mode === "login" ? "Sign in" : "Sign up"}
-        </button>
-        <button
-          type="button"
-          style={styles.authSwitch}
-          onClick={() => {
-            setMode(mode === "login" ? "signup" : "login");
-            setError("");
-          }}
-        >
-          {mode === "login" ? "Need an account? Sign up" : "Already have an account? Sign in"}
+          {busy ? "Please wait…" : "Sign in"}
         </button>
       </form>
     </main>
@@ -196,16 +172,23 @@ export default function StudyMVP() {
   const [error, setError] = useState("");
   const [history, setHistory] = useState([]);
   const [profile, setProfile] = useState(null);
+  const [blockedMessage, setBlockedMessage] = useState("");
   const fileRef = useRef(null);
 
   useEffect(() => onAuthStateChanged(auth, setUser), []);
 
   const authedFetch = async (path, options = {}) => {
     const token = await auth.currentUser.getIdToken();
-    return fetch(`${API_BASE}${path}`, {
+    const res = await fetch(`${API_BASE}${path}`, {
       ...options,
       headers: { ...(options.headers || {}), Authorization: `Bearer ${token}` },
     });
+    if (res.status === 403) {
+      const data = await res.clone().json().catch(() => null);
+      setBlockedMessage(data?.detail || "You don't have access to this app.");
+      await signOut(auth);
+    }
+    return res;
   };
 
   const refreshHistory = async () => {
@@ -230,6 +213,7 @@ export default function StudyMVP() {
 
   useEffect(() => {
     if (user) {
+      setBlockedMessage("");
       refreshHistory();
       refreshProfile();
     } else {
@@ -352,7 +336,7 @@ export default function StudyMVP() {
             <span style={styles.brandName}>Marrow</span>
           </div>
         </header>
-        <AuthScreen />
+        <AuthScreen blockedMessage={blockedMessage} />
       </div>
     );
   }

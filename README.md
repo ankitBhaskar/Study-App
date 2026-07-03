@@ -4,7 +4,8 @@ A React/Vite study app that turns an uploaded PDF into a study workflow: Gemini-
 
 ## Current features
 
-- Firebase email/password login — uploading, chat and podcast audio require an account
+- Firebase email/password login — uploading, chat and podcast audio require an account, with no public sign-up form
+- Optional email allowlist (`ALLOWED_EMAILS`) to restrict the app to specific accounts only
 - Per-user daily usage limit on AI actions (analyze / chat / audio), enforced server-side
 - Document history stored per-account in Firestore (title, summary, quiz, podcast script only — never the PDF or its extracted text) with reopen/delete/clear-all
 - Responsive document upload screen with drag-and-drop interaction
@@ -46,6 +47,7 @@ The repo is zero-config for Vercel: the Vite frontend is built as static assets 
 3. **Build → Firestore Database → Create database** → pick a region close to your Vercel deployment → start in **Production mode** (the backend uses admin credentials that bypass rules, so no rules tuning is needed).
 4. **Project settings → General → Your apps** → click the web (`</>`) icon → register an app → copy the `firebaseConfig` values. These are public identifiers, safe to expose in the frontend bundle.
 5. **Project settings → Service accounts → Generate new private key** → downloads a JSON file. This is a secret — never commit it or expose it to the frontend.
+6. Create your own account: **Authentication → Users → Add user** → enter your email and a password. There's no public sign-up screen in the app, so this is how you (and anyone else you explicitly invite) get an account.
 
 ### 2. Set environment variables in Vercel
 
@@ -59,6 +61,7 @@ In Vercel: your project → **Settings → Environment Variables**:
 - `ELEVENLABS_MODEL` — optional, defaults to `eleven_multilingual_v2`
 - `ELEVENLABS_VOICE_HOST_A` / `ELEVENLABS_VOICE_HOST_B` — optional voice IDs for the two hosts (default: Rachel and Adam)
 - `DAILY_USAGE_LIMIT` — optional, defaults to `5`; caps document analyses, chat messages and audio-segment generations per user per day, combined
+- `ALLOWED_EMAILS` — optional, comma-separated list (e.g. `you@example.com`). Leave unset to allow any account that exists in your Firebase project; set it to lock the app to specific emails only. Enforced server-side on every request, so it applies regardless of how a Firebase account was created.
 
 Then **redeploy** (Deployments → ⋯ → Redeploy) — env var changes only take effect on the next deployment. Verify at `https://<your-app>.vercel.app/api/health`: `gemini_key_configured`, `elevenlabs_key_configured` and `firebase_configured` should all be `true`.
 
@@ -102,7 +105,7 @@ Then run the backend with `FIREBASE_PROJECT_ID=demo-study-app FIRESTORE_EMULATOR
 - `GET /api/documents` — the signed-in user's document history (up to 50, newest first).
 - `DELETE /api/documents/{id}` / `DELETE /api/documents` — delete one document or clear all history.
 - `POST /api/pdf/prepare` — extract, clean and chunk PDF text and return a Gemini-ready payload without calling Gemini. No sign-in needed.
-- `GET /api/health` — reports service status and whether Gemini, ElevenLabs and Firebase are configured.
+- `GET /api/health` — reports service status and whether Gemini, ElevenLabs and Firebase are configured, plus whether `ALLOWED_EMAILS` is restricting access.
 
 All endpoints except `/api/pdf/prepare` and `/api/health` require an `Authorization: Bearer <Firebase ID token>` header.
 
@@ -124,4 +127,6 @@ The expected Gemini output shape is documented in `gemini_response_contract.json
 - Serverless functions keep no state between requests, so the browser holds the extracted document text and sends it with each tutor-chat message.
 - Document history stores only derived data (title, summary, quiz, podcast script) — never the PDF or its extracted text. Reopening a document from history works for Summary/Quiz/Podcast, but Tutor chat needs the PDF re-uploaded since no grounding text was retained.
 - Scanned (image-only) PDFs need OCR first; the API returns a clear error for them.
+- There's no public sign-up form — new accounts are created manually in the Firebase Console (Authentication → Users). Hiding the sign-up button is UX only; the real access control is the server-side `ALLOWED_EMAILS` check, since Firebase's public API key means anyone could otherwise call Firebase's own sign-up endpoint directly.
+- If a signed-in account isn't on `ALLOWED_EMAILS`, every API call returns 403 and the frontend immediately signs them out with a clear message rather than leaving them stuck in a broken logged-in state.
 - Without a key configured, the corresponding feature returns a clear "not configured" error rather than failing silently; the sample-document demo mode never needs any key and works for anyone signed in.

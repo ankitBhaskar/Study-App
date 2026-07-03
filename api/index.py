@@ -50,6 +50,9 @@ USING_FIREBASE_EMULATOR = bool(os.getenv("FIRESTORE_EMULATOR_HOST") or os.getenv
 # the three actions that call a paid API. One counter keeps this simple;
 # split it into separate counters later if different limits are needed.
 DAILY_USAGE_LIMIT = int(os.getenv("DAILY_USAGE_LIMIT", "5"))
+# Comma-separated allowlist of emails permitted to use the app. Empty means
+# unrestricted — set this to lock the app down to specific accounts.
+ALLOWED_EMAILS = {e.strip().lower() for e in os.getenv("ALLOWED_EMAILS", "").split(",") if e.strip()}
 
 app = FastAPI(
     title=APP_NAME,
@@ -253,7 +256,11 @@ async def require_user(authorization: str | None = Header(default=None)) -> Auth
     except Exception as exc:
         raise HTTPException(status_code=401, detail="Your session has expired. Please sign in again.") from exc
 
-    return AuthedUser(uid=decoded["uid"], email=decoded.get("email"))
+    email = decoded.get("email")
+    if ALLOWED_EMAILS and (not email or email.lower() not in ALLOWED_EMAILS):
+        raise HTTPException(status_code=403, detail="This app is invite-only. Contact the owner for access.")
+
+    return AuthedUser(uid=decoded["uid"], email=email)
 
 
 def _today_key() -> str:
@@ -571,6 +578,7 @@ def health() -> dict[str, Any]:
         "elevenlabs_key_configured": bool(get_elevenlabs_api_key()),
         "firebase_configured": firebase_configured(),
         "daily_usage_limit": DAILY_USAGE_LIMIT,
+        "access_restricted": bool(ALLOWED_EMAILS),
     }
 
 
