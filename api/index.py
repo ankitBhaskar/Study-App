@@ -5,13 +5,19 @@ import json
 import os
 import re
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 
+import firebase_admin
 import httpx
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
+from firebase_admin import auth as firebase_auth
+from firebase_admin import credentials, firestore
+from google.auth.credentials import AnonymousCredentials
+from google.cloud import firestore as gcloud_firestore
 from pydantic import BaseModel
 from pypdf import PdfReader
 
@@ -34,6 +40,16 @@ ELEVENLABS_VOICE_HOST_A = os.getenv("ELEVENLABS_VOICE_HOST_A", "21m00Tcm4TlvDq8i
 ELEVENLABS_VOICE_HOST_B = os.getenv("ELEVENLABS_VOICE_HOST_B", "pNInz6obpgDQGcFmaJgB")
 ELEVENLABS_TIMEOUT_SECONDS = 55.0
 MAX_SEGMENT_TEXT_CHARS = 1_000
+FIREBASE_PROJECT_ID = os.getenv("FIREBASE_PROJECT_ID")
+FIREBASE_CLIENT_EMAIL = os.getenv("FIREBASE_CLIENT_EMAIL")
+FIREBASE_PRIVATE_KEY = os.getenv("FIREBASE_PRIVATE_KEY")
+# Local dev/testing against the Firebase Local Emulator Suite needs no real
+# service account — the emulator env vars are enough to talk to it.
+USING_FIREBASE_EMULATOR = bool(os.getenv("FIRESTORE_EMULATOR_HOST") or os.getenv("FIREBASE_AUTH_EMULATOR_HOST"))
+# Shared daily cap across document analysis, tutor chat and podcast audio —
+# the three actions that call a paid API. One counter keeps this simple;
+# split it into separate counters later if different limits are needed.
+DAILY_USAGE_LIMIT = int(os.getenv("DAILY_USAGE_LIMIT", "5"))
 
 app = FastAPI(
     title=APP_NAME,
@@ -132,12 +148,138 @@ class SegmentAudioRequest(BaseModel):
     speaker: int = 0
 
 
+class AuthedUser(BaseModel):
+    uid: str
+    email: str | None = None
+
+
+class ProfileResponse(BaseModel):
+    uid: str
+    email: str | None
+    created_at: str
+    usage_today: int
+    daily_limit: int
+
+
+class DocumentRecord(BaseModel):
+    id: str
+    title: str
+    file_name: str
+    created_at: str
+    summary: list[str]
+    quiz: list[QuizQuestion]
+    podcast: Podcast
+
+
+class DocumentListResponse(BaseModel):
+    documents: list[DocumentRecord]
+
+
 def get_gemini_api_key() -> str | None:
     return os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
 
 
 def get_elevenlabs_api_key() -> str | None:
     return os.getenv("ELEVENLABS_API_KEY")
+
+
+def firebase_configured() -> bool:
+    return USING_FIREBASE_EMULATOR or bool(
+        FIREBASE_PROJECT_ID and FIREBASE_CLIENT_EMAIL and FIREBASE_PRIVATE_KEY
+    )
+
+
+def get_firebase_app() -> firebase_admin.App | None:
+    try:
+        return firebase_admin.get_app()
+    except ValueError:
+        pass
+
+    if USING_FIREBASE_EMULATOR:
+        return firebase_admin.initialize_app(options={"projectId": FIREBASE_PROJECT_ID or "demo-study-app"})
+
+    if not firebase_configured():
+        return None
+
+    cred = credentials.Certificate(
+        {
+            "type": "service_account",
+            "project_id": FIREBASE_PROJECT_ID,
+            "client_email": FIREBASE_CLIENT_EMAIL,
+            "private_key": FIREBASE_PRIVATE_KEY.replace("\\n", "\n"),
+            "token_uri": "https://oauth2.googleapis.com/token",
+        }
+    )
+    return firebase_admin.initialize_app(cred)
+
+
+_emulator_firestore_client: gcloud_firestore.Client | None = None
+
+
+def get_firestore_client():
+    global _emulator_firestore_client
+
+    if USING_FIREBASE_EMULATOR:
+        # firebase_admin.firestore.client() eagerly resolves real Google
+        # Application Default Credentials even when talking to the emulator,
+        # which fails wherever ADC isn't configured. Anonymous credentials
+        # sidestep that — the emulator never checks them anyway.
+        if _emulator_firestore_client is None:
+            _emulator_firestore_client = gcloud_firestore.Client(
+                project=FIREBASE_PROJECT_ID or "demo-study-app",
+                credentials=AnonymousCredentials(),
+            )
+        return _emulator_firestore_client
+
+    app_instance = get_firebase_app()
+    return firestore.client(app_instance) if app_instance else None
+
+
+async def require_user(authorization: str | None = Header(default=None)) -> AuthedUser:
+    if not firebase_configured():
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Login is not configured yet. Add FIREBASE_PROJECT_ID, FIREBASE_CLIENT_EMAIL and "
+                "FIREBASE_PRIVATE_KEY in your Vercel project settings and redeploy."
+            ),
+        )
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Sign in required.")
+
+    token = authorization.removeprefix("Bearer ").strip()
+    try:
+        decoded = firebase_auth.verify_id_token(token, app=get_firebase_app())
+    except Exception as exc:
+        raise HTTPException(status_code=401, detail="Your session has expired. Please sign in again.") from exc
+
+    return AuthedUser(uid=decoded["uid"], email=decoded.get("email"))
+
+
+def _today_key() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+def check_usage_limit(uid: str) -> None:
+    db = get_firestore_client()
+    if db is None:
+        return
+    usage_ref = db.collection("users").document(uid).collection("usage").document(_today_key())
+    snapshot = usage_ref.get()
+    current = (snapshot.to_dict() or {}).get("count", 0) if snapshot.exists else 0
+    if current >= DAILY_USAGE_LIMIT:
+        raise HTTPException(
+            status_code=429,
+            detail=f"You've used all {DAILY_USAGE_LIMIT} AI actions for today. Please try again tomorrow.",
+        )
+
+
+def increment_usage(uid: str) -> None:
+    db = get_firestore_client()
+    if db is None:
+        return
+    usage_ref = db.collection("users").document(uid).collection("usage").document(_today_key())
+    usage_ref.set({"count": firestore.Increment(1), "date": _today_key()}, merge=True)
 
 
 def clean_pdf_text(raw_text: str) -> str:
@@ -427,7 +569,75 @@ def health() -> dict[str, Any]:
         "gemini_key_configured": bool(get_gemini_api_key()),
         "elevenlabs_model": ELEVENLABS_MODEL,
         "elevenlabs_key_configured": bool(get_elevenlabs_api_key()),
+        "firebase_configured": firebase_configured(),
+        "daily_usage_limit": DAILY_USAGE_LIMIT,
     }
+
+
+@app.get("/api/profile", response_model=ProfileResponse)
+async def get_profile(user: AuthedUser = Depends(require_user)) -> ProfileResponse:
+    db = get_firestore_client()
+    profile_ref = db.collection("users").document(user.uid)
+    snapshot = profile_ref.get()
+    if snapshot.exists:
+        data = snapshot.to_dict() or {}
+    else:
+        data = {"email": user.email, "created_at": datetime.now(timezone.utc).isoformat()}
+        profile_ref.set(data, merge=True)
+
+    usage_snapshot = profile_ref.collection("usage").document(_today_key()).get()
+    usage_today = (usage_snapshot.to_dict() or {}).get("count", 0) if usage_snapshot.exists else 0
+
+    return ProfileResponse(
+        uid=user.uid,
+        email=data.get("email") or user.email,
+        created_at=data.get("created_at", ""),
+        usage_today=usage_today,
+        daily_limit=DAILY_USAGE_LIMIT,
+    )
+
+
+@app.get("/api/documents", response_model=DocumentListResponse)
+async def list_documents(user: AuthedUser = Depends(require_user)) -> DocumentListResponse:
+    db = get_firestore_client()
+    docs_ref = (
+        db.collection("users")
+        .document(user.uid)
+        .collection("documents")
+        .order_by("created_at", direction=firestore.Query.DESCENDING)
+        .limit(50)
+    )
+    records = []
+    for doc in docs_ref.stream():
+        data = doc.to_dict() or {}
+        records.append(
+            DocumentRecord(
+                id=doc.id,
+                title=data.get("title", "Untitled"),
+                file_name=data.get("file_name", ""),
+                created_at=data.get("created_at", ""),
+                summary=data.get("summary", []),
+                quiz=[QuizQuestion(**q) for q in data.get("quiz", [])],
+                podcast=Podcast(**data.get("podcast", {"duration": "0:00", "hosts": [], "transcript": []})),
+            )
+        )
+    return DocumentListResponse(documents=records)
+
+
+@app.delete("/api/documents/{doc_id}")
+async def delete_document(doc_id: str, user: AuthedUser = Depends(require_user)) -> dict[str, str]:
+    db = get_firestore_client()
+    db.collection("users").document(user.uid).collection("documents").document(doc_id).delete()
+    return {"status": "deleted"}
+
+
+@app.delete("/api/documents")
+async def clear_documents(user: AuthedUser = Depends(require_user)) -> dict[str, str]:
+    db = get_firestore_client()
+    docs_ref = db.collection("users").document(user.uid).collection("documents")
+    for doc in docs_ref.stream():
+        doc.reference.delete()
+    return {"status": "cleared"}
 
 
 @app.post("/api/pdf/prepare", response_model=PdfProcessingResponse)
@@ -449,7 +659,9 @@ async def prepare_pdf(file: UploadFile = File(...)) -> PdfProcessingResponse:
 
 
 @app.post("/api/pdf/analyze", response_model=StudyAnalysisResponse)
-async def analyze_pdf(file: UploadFile = File(...)) -> StudyAnalysisResponse:
+async def analyze_pdf(file: UploadFile = File(...), user: AuthedUser = Depends(require_user)) -> StudyAnalysisResponse:
+    check_usage_limit(user.uid)
+
     extracted = await read_pdf_upload(file)
     file_name = file.filename or "uploaded-document.pdf"
     context = extracted.text[:MAX_GEMINI_CONTEXT_CHARS]
@@ -473,6 +685,22 @@ async def analyze_pdf(file: UploadFile = File(...)) -> StudyAnalysisResponse:
     raw = parse_json_text(raw_text)
     title, summary, quiz, podcast = normalise_study_content(raw, file_name)
 
+    increment_usage(user.uid)
+    db = get_firestore_client()
+    if db is not None:
+        # Only the derived study data is persisted — never the PDF or the
+        # extracted document text — per the "data, not the document" design.
+        db.collection("users").document(user.uid).collection("documents").add(
+            {
+                "title": title,
+                "file_name": file_name,
+                "summary": summary,
+                "quiz": [q.model_dump() for q in quiz],
+                "podcast": podcast.model_dump(),
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+
     return StudyAnalysisResponse(
         file_name=file_name,
         page_count=extracted.page_count,
@@ -485,7 +713,9 @@ async def analyze_pdf(file: UploadFile = File(...)) -> StudyAnalysisResponse:
 
 
 @app.post("/api/chat", response_model=ChatResponse)
-async def chat(request: ChatRequest) -> ChatResponse:
+async def chat(request: ChatRequest, user: AuthedUser = Depends(require_user)) -> ChatResponse:
+    check_usage_limit(user.uid)
+
     context = request.document_context.strip()[:MAX_GEMINI_CONTEXT_CHARS]
     if not context:
         raise HTTPException(status_code=400, detail="Document context is missing. Please upload the PDF again.")
@@ -512,11 +742,16 @@ async def chat(request: ChatRequest) -> ChatResponse:
     contents.append({"role": "user", "parts": [{"text": question}]})
 
     answer = await call_gemini(system_instruction, contents, json_response=False)
+    increment_usage(user.uid)
     return ChatResponse(answer=answer.strip())
 
 
 @app.post("/api/podcast/segment-audio")
-async def podcast_segment_audio(request: SegmentAudioRequest) -> Response:
+async def podcast_segment_audio(
+    request: SegmentAudioRequest, user: AuthedUser = Depends(require_user)
+) -> Response:
+    check_usage_limit(user.uid)
+
     api_key = get_elevenlabs_api_key()
     if not api_key:
         raise HTTPException(
@@ -559,4 +794,5 @@ async def podcast_segment_audio(request: SegmentAudioRequest) -> Response:
             message = response.text[:300]
         raise HTTPException(status_code=502, detail=f"ElevenLabs API error ({response.status_code}): {message}")
 
+    increment_usage(user.uid)
     return Response(content=response.content, media_type="audio/mpeg")
