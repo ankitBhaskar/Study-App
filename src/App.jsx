@@ -17,7 +17,32 @@ import {
   X,
 } from "lucide-react";
 import { onAuthStateChanged, signInWithEmailAndPassword, signOut } from "firebase/auth";
+import ReactMarkdown from "react-markdown";
 import { auth } from "./firebase";
+
+// Gemini output often contains markdown (bold, bullet lists, etc.) — render
+// it instead of showing literal asterisks. react-markdown renders straight
+// to React elements (no dangerouslySetInnerHTML), so this stays XSS-safe.
+const markdownComponents = {
+  p: ({ children }) => <p style={{ margin: "0 0 8px" }}>{children}</p>,
+  ul: ({ children }) => <ul style={{ margin: "4px 0 8px", paddingLeft: 20 }}>{children}</ul>,
+  ol: ({ children }) => <ol style={{ margin: "4px 0 8px", paddingLeft: 20 }}>{children}</ol>,
+  li: ({ children }) => <li style={{ margin: "2px 0" }}>{children}</li>,
+  code: ({ children }) => (
+    <code style={{ background: "rgba(0,0,0,0.06)", padding: "1px 5px", borderRadius: 4, fontSize: "0.9em" }}>
+      {children}
+    </code>
+  ),
+  a: ({ children, href }) => (
+    <a href={href} target="_blank" rel="noreferrer" style={{ color: "inherit" }}>
+      {children}
+    </a>
+  ),
+};
+
+function Markdown({ children }) {
+  return <ReactMarkdown components={markdownComponents}>{children}</ReactMarkdown>;
+}
 
 // In production the API is served by Vercel functions on the same origin;
 // in local dev the FastAPI server runs separately on port 8000.
@@ -248,6 +273,7 @@ export default function StudyMVP() {
       documentContext: context,
       fromHistory: true,
       docFileName: entry.file_name,
+      documentId: entry.id,
     });
     setLoading(false);
     setStage("study");
@@ -311,6 +337,7 @@ export default function StudyMVP() {
         podcast: data.podcast,
         documentContext: data.document_context,
         docFileName: data.file_name,
+        documentId: data.document_id,
       });
       refreshHistory();
       refreshProfile();
@@ -543,7 +570,7 @@ function StudyScreen({ tab, setTab, fileName, doc, authedFetch }) {
       <section className="panel" style={styles.panel}>
         {tab === "summary" && <SummaryPanel doc={doc} />}
         {tab === "quiz" && <QuizPanel doc={doc} />}
-        {tab === "podcast" && <PodcastPanel doc={doc} authedFetch={authedFetch} />}
+        {tab === "podcast" && <PodcastPanel doc={doc} documentId={doc.documentId} authedFetch={authedFetch} />}
         {tab === "tutor" && (
           <TutorPanel
             documentContext={doc.documentContext}
@@ -565,7 +592,7 @@ function SummaryPanel({ doc }) {
         {doc.summary.map((point, i) => (
           <li key={i} style={styles.summaryItem}>
             <span style={styles.summaryNum}>{String(i + 1).padStart(2, "0")}</span>
-            <span>{point}</span>
+            <span><Markdown>{point}</Markdown></span>
           </li>
         ))}
       </ul>
@@ -656,47 +683,31 @@ function QuizPanel({ doc }) {
   );
 }
 
-function PodcastPanel({ doc, authedFetch }) {
+function PodcastPanel({ doc, documentId, authedFetch }) {
   const { duration, hosts, transcript } = doc.podcast;
-  const [playing, setPlaying] = useState(false);
-  const [elapsed, setElapsed] = useState(0);
-  const intervalRef = useRef(null);
 
-  // AI audio state: idle → generating → ready (or error)
+  // AI audio state: idle → generating → ready (or error). There is no
+  // simulated/fake playback — the player only appears once real audio
+  // exists, so the play button never implies audio that isn't there.
   const [audioState, setAudioState] = useState("idle");
   const [audioUrls, setAudioUrls] = useState([]);
   const [genProgress, setGenProgress] = useState(0);
   const [audioError, setAudioError] = useState("");
+  const [playing, setPlaying] = useState(false);
   const [playingIdx, setPlayingIdx] = useState(0);
   const [segProgress, setSegProgress] = useState(0);
   const audioRef = useRef(null);
 
-  React.useEffect(() => {
+  useEffect(() => {
     return () => {
       audioRef.current?.pause();
-      clearInterval(intervalRef.current);
     };
   }, []);
-
-  const toSec = (mmss) => {
-    const [m, s] = mmss.split(":").map(Number);
-    return m * 60 + s;
-  };
-
-  const total = Math.max(toSec(duration) || 600, toSec(transcript[transcript.length - 1]?.t || "0:00") + 30);
-
-  const fmt = (sec) => {
-    const m = Math.floor(sec / 60);
-    const s = Math.floor(sec % 60);
-    return `${m}:${String(s).padStart(2, "0")}`;
-  };
 
   const generateAudio = async () => {
     setAudioState("generating");
     setAudioError("");
     setGenProgress(0);
-    clearInterval(intervalRef.current);
-    setPlaying(false);
     try {
       const urls = new Array(transcript.length);
       let next = 0;
@@ -709,7 +720,14 @@ function PodcastPanel({ doc, authedFetch }) {
           const res = await authedFetch("/api/podcast/segment-audio", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ text: seg.line, speaker: seg.who === hosts[0] ? 0 : 1 }),
+            body: JSON.stringify({
+              text: seg.line,
+              speaker: seg.who === hosts[0] ? 0 : 1,
+              // Lets the backend cache/reuse generated audio for this exact
+              // document + segment instead of paying for it again next time.
+              document_id: documentId || null,
+              segment_index: i,
+            }),
           });
           if (!res.ok) {
             const data = await res.json().catch(() => null);
@@ -756,54 +774,20 @@ function PodcastPanel({ doc, authedFetch }) {
   };
 
   const toggle = () => {
-    if (audioState === "ready") {
-      const a = audioRef.current;
-      if (playing) {
-        a?.pause();
-        setPlaying(false);
-      } else if (a?.src && !a.ended) {
-        a.play();
-        setPlaying(true);
-      } else {
-        playSegment(0);
-      }
-      return;
-    }
-
+    const a = audioRef.current;
     if (playing) {
-      clearInterval(intervalRef.current);
+      a?.pause();
       setPlaying(false);
-      return;
+    } else if (a?.src && !a.ended) {
+      a.play();
+      setPlaying(true);
+    } else {
+      playSegment(0);
     }
-
-    setPlaying(true);
-    intervalRef.current = setInterval(() => {
-      setElapsed((e) => {
-        if (e >= total) {
-          clearInterval(intervalRef.current);
-          setPlaying(false);
-          return total;
-        }
-        return e + 2;
-      });
-    }, 200);
   };
 
   const audioReady = audioState === "ready";
-  const activeIdx = audioReady
-    ? playingIdx
-    : transcript.reduce((acc, seg, i) => (elapsed >= toSec(seg.t) ? i : acc), 0);
-  const progress = audioReady
-    ? Math.min(((playingIdx + segProgress) / transcript.length) * 100, 100)
-    : Math.min((elapsed / total) * 100, 100);
-
-  const seek = (pct) => {
-    if (audioReady) {
-      playSegment(Math.min(Math.floor(pct * transcript.length), transcript.length - 1));
-    } else {
-      setElapsed(Math.round(pct * total));
-    }
-  };
+  const progress = Math.min(((playingIdx + segProgress) / transcript.length) * 100, 100);
 
   return (
     <div className="fade">
@@ -830,7 +814,6 @@ function PodcastPanel({ doc, authedFetch }) {
             Generating audio… {genProgress}/{transcript.length}
           </span>
         )}
-        {audioState === "ready" && <span style={styles.audioStatus}>AI audio ready — press play.</span>}
         {audioState === "error" && (
           <span style={{ ...styles.audioStatus, color: "#b03d2e" }}>
             {audioError}{" "}
@@ -839,53 +822,50 @@ function PodcastPanel({ doc, authedFetch }) {
         )}
       </div>
 
-      <div className="player" style={styles.player}>
-        <button style={styles.playBtn} onClick={toggle} aria-label={playing ? "Pause" : "Play"}>
-          {playing ? <Pause size={20} /> : <Play size={20} style={{ marginLeft: 2 }} />}
-        </button>
-        <div style={{ flex: 1 }}>
-          <div
-            style={styles.track}
-            onClick={(e) => {
-              const rect = e.currentTarget.getBoundingClientRect();
-              seek((e.clientX - rect.left) / rect.width);
-            }}
-          >
-            <div style={{ ...styles.trackFill, width: `${progress}%` }} />
-            <div style={{ ...styles.trackThumb, left: `${progress}%` }} />
-          </div>
-          <div style={styles.timeRow}>
-            {audioReady ? (
-              <>
-                <span>Segment {playingIdx + 1} / {transcript.length}</span>
-                <span>AI audio</span>
-              </>
-            ) : (
-              <>
-                <span>{fmt(elapsed)}</span>
-                <span>{duration}</span>
-              </>
-            )}
+      {audioReady && (
+        <div className="player" style={styles.player}>
+          <button style={styles.playBtn} onClick={toggle} aria-label={playing ? "Pause" : "Play"}>
+            {playing ? <Pause size={20} /> : <Play size={20} style={{ marginLeft: 2 }} />}
+          </button>
+          <div style={{ flex: 1 }}>
+            <div
+              style={styles.track}
+              onClick={(e) => {
+                const rect = e.currentTarget.getBoundingClientRect();
+                const pct = (e.clientX - rect.left) / rect.width;
+                playSegment(Math.min(Math.floor(pct * transcript.length), transcript.length - 1));
+              }}
+            >
+              <div style={{ ...styles.trackFill, width: `${progress}%` }} />
+              <div style={{ ...styles.trackThumb, left: `${progress}%` }} />
+            </div>
+            <div style={styles.timeRow}>
+              <span>Segment {playingIdx + 1} / {transcript.length}</span>
+              <span>AI audio</span>
+            </div>
           </div>
         </div>
-      </div>
+      )}
 
       <div className="transcript" style={styles.transcript}>
         <p style={styles.transcriptLabel}>Transcript</p>
         {transcript.map((seg, i) => {
-          const active = i === activeIdx;
+          const active = audioReady && i === playingIdx;
           return (
             <div
               key={i}
               className="segment"
-              style={{ opacity: active ? 1 : 0.45 }}
-              onClick={() => (audioReady ? playSegment(i) : setElapsed(toSec(seg.t)))}
+              style={{
+                opacity: audioReady ? (active ? 1 : 0.45) : 1,
+                cursor: audioReady ? "pointer" : "default",
+              }}
+              onClick={() => audioReady && playSegment(i)}
             >
               <span style={styles.segTime}>{audioReady ? `#${i + 1}` : seg.t}</span>
               <span style={{ ...styles.segWho, color: seg.who === hosts[0] ? moss : amber }}>
                 {seg.who}
               </span>
-              <span style={styles.segLine}>{seg.line}</span>
+              <span style={styles.segLine}><Markdown>{seg.line}</Markdown></span>
             </div>
           );
         })}
@@ -974,7 +954,7 @@ function TutorPanel({ documentContext, docFileName, fromHistory, authedFetch }) 
               ...(m.role === "user" ? styles.bubbleUser : styles.bubbleTutor),
             }}
           >
-            {m.text}
+            {m.role === "user" ? m.text : <Markdown>{m.text}</Markdown>}
           </div>
         ))}
         {busy && (

@@ -14,7 +14,8 @@
     "react": "latest",
     "react-dom": "latest",
     "lucide-react": "latest",
-    "firebase": "latest"
+    "firebase": "latest",
+    "react-markdown": "latest"
   },
   "devDependencies": {}
 }

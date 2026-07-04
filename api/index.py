@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import io
 import json
 import os
@@ -138,6 +139,10 @@ class StudyAnalysisResponse(BaseModel):
     # Serverless functions keep no state between requests, so the client
     # holds the extracted document text and sends it back with chat calls.
     document_context: str
+    # Firestore document id, so the client can cache generated podcast audio
+    # against this document and reuse it on a later visit. None if Firestore
+    # isn't configured or the document couldn't be saved.
+    document_id: str | None = None
 
 
 class ChatTurn(BaseModel):
@@ -159,6 +164,11 @@ class ChatResponse(BaseModel):
 class SegmentAudioRequest(BaseModel):
     text: str
     speaker: int = 0
+    # Optional cache key: when both are given and the document belongs to
+    # the caller, previously generated audio for this exact segment is
+    # reused instead of calling ElevenLabs again.
+    document_id: str | None = None
+    segment_index: int | None = None
 
 
 class AuthedUser(BaseModel):
@@ -321,6 +331,40 @@ def truncate_utf8(text: str, max_bytes: int) -> str:
     if len(encoded) <= max_bytes:
         return text
     return encoded[:max_bytes].decode("utf-8", errors="ignore")
+
+
+def _audio_segment_ref(db, uid: str, doc_id: str, segment_index: int):
+    return (
+        db.collection("users")
+        .document(uid)
+        .collection("documents")
+        .document(doc_id)
+        .collection("audio")
+        .document(str(segment_index))
+    )
+
+
+def get_cached_segment_audio(uid: str, doc_id: str, segment_index: int) -> bytes | None:
+    db = get_firestore_client()
+    if db is None:
+        return None
+    snapshot = _audio_segment_ref(db, uid, doc_id, segment_index).get()
+    if not snapshot.exists:
+        return None
+    encoded = (snapshot.to_dict() or {}).get("data")
+    return base64.b64decode(encoded) if encoded else None
+
+
+def save_segment_audio(uid: str, doc_id: str, segment_index: int, audio_bytes: bytes) -> None:
+    db = get_firestore_client()
+    if db is None:
+        return
+    # A separate document per segment (rather than a field on the parent
+    # document) keeps each one well under Firestore's 1 MiB cap regardless
+    # of how large the stored extracted text on the parent already is.
+    _audio_segment_ref(db, uid, doc_id, segment_index).set(
+        {"data": base64.b64encode(audio_bytes).decode("ascii")}
+    )
 
 
 def check_usage_limit(uid: str) -> None:
@@ -710,10 +754,18 @@ async def get_document(doc_id: str, user: AuthedUser = Depends(require_user)) ->
     )
 
 
+def _delete_document_and_audio(doc_ref) -> None:
+    # Firestore doesn't cascade-delete subcollections, so the cached audio
+    # segments would otherwise be orphaned (unreachable but still stored).
+    for audio_doc in doc_ref.collection("audio").stream():
+        audio_doc.reference.delete()
+    doc_ref.delete()
+
+
 @app.delete("/api/documents/{doc_id}")
 async def delete_document(doc_id: str, user: AuthedUser = Depends(require_user)) -> dict[str, str]:
     db = get_firestore_client()
-    db.collection("users").document(user.uid).collection("documents").document(doc_id).delete()
+    _delete_document_and_audio(db.collection("users").document(user.uid).collection("documents").document(doc_id))
     return {"status": "deleted"}
 
 
@@ -722,7 +774,7 @@ async def clear_documents(user: AuthedUser = Depends(require_user)) -> dict[str,
     db = get_firestore_client()
     docs_ref = db.collection("users").document(user.uid).collection("documents")
     for doc in docs_ref.stream():
-        doc.reference.delete()
+        _delete_document_and_audio(doc.reference)
     return {"status": "cleared"}
 
 
@@ -773,11 +825,12 @@ async def analyze_pdf(file: UploadFile = File(...), user: AuthedUser = Depends(r
 
     increment_usage(user.uid)
     db = get_firestore_client()
+    document_id = None
     if db is not None:
         # The PDF file itself is never stored — only the extracted text
         # (truncated to fit Firestore's 1 MiB document cap) and the derived
         # study data, so Tutor chat keeps working on history-reopened docs.
-        db.collection("users").document(user.uid).collection("documents").add(
+        _, doc_ref = db.collection("users").document(user.uid).collection("documents").add(
             {
                 "title": title,
                 "file_name": file_name,
@@ -788,6 +841,7 @@ async def analyze_pdf(file: UploadFile = File(...), user: AuthedUser = Depends(r
                 "created_at": datetime.now(timezone.utc).isoformat(),
             }
         )
+        document_id = doc_ref.id
 
     return StudyAnalysisResponse(
         file_name=file_name,
@@ -797,6 +851,7 @@ async def analyze_pdf(file: UploadFile = File(...), user: AuthedUser = Depends(r
         quiz=quiz,
         podcast=podcast,
         document_context=context,
+        document_id=document_id,
     )
 
 
@@ -838,6 +893,12 @@ async def chat(request: ChatRequest, user: AuthedUser = Depends(require_user)) -
 async def podcast_segment_audio(
     request: SegmentAudioRequest, user: AuthedUser = Depends(require_user)
 ) -> Response:
+    has_cache_key = request.document_id and request.segment_index is not None
+    if has_cache_key:
+        cached = get_cached_segment_audio(user.uid, request.document_id, request.segment_index)
+        if cached:
+            return Response(content=cached, media_type="audio/mpeg")
+
     check_usage_limit(user.uid)
 
     api_key = get_elevenlabs_api_key()
@@ -883,5 +944,9 @@ async def podcast_segment_audio(
             message = response.text[:300]
         raise HTTPException(status_code=502, detail=f"ElevenLabs API error ({response.status_code}): {message}")
 
+    audio_bytes = response.content
+    if has_cache_key:
+        save_segment_audio(user.uid, request.document_id, request.segment_index, audio_bytes)
+
     increment_usage(user.uid)
-    return Response(content=response.content, media_type="audio/mpeg")
+    return Response(content=audio_bytes, media_type="audio/mpeg")

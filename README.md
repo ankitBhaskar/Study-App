@@ -12,7 +12,8 @@ A React/Vite study app that turns an uploaded PDF into a study workflow: Gemini-
 - Real PDF upload → Gemini analysis producing summary, quiz and podcast script
 - Interactive quiz with scoring and weak-topic feedback
 - Podcast player with generated transcript
-- AI podcast audio: two distinct ElevenLabs voices read the generated script
+- AI podcast audio: two distinct ElevenLabs voices read the generated script; once generated for a document, audio is cached in Firestore and reused free on later visits instead of calling ElevenLabs again
+- Chat and summary text render markdown (bold, lists, etc.) instead of showing raw asterisks
 - Tutor chat answering questions scoped to the uploaded PDF via Gemini
 - "Try it with a sample document" demo mode that works without signing in
 - Configurable Gemini model, ElevenLabs model/voices and daily usage limit via environment variables
@@ -100,7 +101,7 @@ Then run the backend with `FIREBASE_PROJECT_ID=demo-study-app FIRESTORE_EMULATOR
 
 - `POST /api/pdf/analyze` — upload a PDF, get Gemini-generated study content (title, summary, quiz, podcast script) plus the extracted `document_context` used for tutor chat, and save the derived data to the signed-in user's Firestore history. Requires sign-in and `GEMINI_API_KEY`; counts against the daily usage limit.
 - `POST /api/chat` — ask the tutor a question scoped to the uploaded document (`{document_context, file_name, question, history}`). Requires sign-in and `GEMINI_API_KEY`; counts against the daily usage limit.
-- `POST /api/podcast/segment-audio` — turn one transcript segment into speech (`{text, speaker}` where speaker is 0 or 1); returns MP3 audio. Requires sign-in and `ELEVENLABS_API_KEY`; counts against the daily usage limit. The frontend calls this once per segment and plays them back-to-back, keeping each response well under Vercel's size limits.
+- `POST /api/podcast/segment-audio` — turn one transcript segment into speech (`{text, speaker, document_id, segment_index}`; the last two are optional but enable caching); returns MP3 audio. Requires sign-in and `ELEVENLABS_API_KEY`; counts against the daily usage limit only on a cache miss. The frontend calls this once per segment and plays them back-to-back, keeping each response well under Vercel's size limits. When `document_id`/`segment_index` are given, generated audio is stored (base64, one Firestore document per segment) and reused on future requests for that exact segment — free and instant, no new ElevenLabs call or usage-limit hit.
 - `GET /api/profile` — the signed-in user's email, account creation date, and today's usage vs. the daily limit.
 - `GET /api/documents` — the signed-in user's document history (up to 50, newest first; metadata and study data only).
 - `GET /api/documents/{id}` — one history document including its stored extracted text, used to re-enable Tutor chat when reopening.
