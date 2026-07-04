@@ -29,7 +29,9 @@ APP_NAME = "Study App API"
 MAX_FILE_SIZE_BYTES = 4 * 1024 * 1024
 DEFAULT_CHUNK_SIZE = 6_000
 DEFAULT_CHUNK_OVERLAP = 600
-MAX_GEMINI_CONTEXT_CHARS = 200_000
+# A 4 MB text-based PDF rarely extracts to more than this; ~400k chars is
+# roughly 100k tokens, comfortably inside gemini-2.5-flash's 1M context.
+MAX_GEMINI_CONTEXT_CHARS = 400_000
 GEMINI_API_BASE = os.getenv("GEMINI_API_BASE", "https://generativelanguage.googleapis.com/v1beta")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 GEMINI_TIMEOUT_SECONDS = 55.0
@@ -45,9 +47,9 @@ ELEVENLABS_VOICE_HOST_A = os.getenv("ELEVENLABS_VOICE_HOST_A")
 ELEVENLABS_VOICE_HOST_B = os.getenv("ELEVENLABS_VOICE_HOST_B")
 ELEVENLABS_TIMEOUT_SECONDS = 55.0
 MAX_SEGMENT_TEXT_CHARS = 1_000
-# Firestore caps a document at 1 MiB; leave room for the study data fields
-# when persisting the extracted text alongside them.
-MAX_STORED_CONTEXT_BYTES = 700_000
+# Firestore caps a document at 1 MiB (1,048,576 bytes) including every field;
+# 900 KB of text leaves ~120 KB of headroom for the study data stored with it.
+MAX_STORED_CONTEXT_BYTES = 900_000
 FIREBASE_PROJECT_ID = os.getenv("FIREBASE_PROJECT_ID")
 FIREBASE_CLIENT_EMAIL = os.getenv("FIREBASE_CLIENT_EMAIL")
 FIREBASE_PRIVATE_KEY = os.getenv("FIREBASE_PRIVATE_KEY")
