@@ -1,4 +1,4 @@
-import React, { useRef, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import {
   ArrowRight,
   BookOpen,
@@ -6,6 +6,7 @@ import {
   FileText,
   Headphones,
   ListChecks,
+  LogOut,
   MessageCircle,
   Pause,
   Play,
@@ -15,6 +16,8 @@ import {
   Upload,
   X,
 } from "lucide-react";
+import { onAuthStateChanged, signInWithEmailAndPassword, signOut } from "firebase/auth";
+import { auth } from "./firebase";
 
 // In production the API is served by Vercel functions on the same origin;
 // in local dev the FastAPI server runs separately on port 8000.
@@ -22,41 +25,6 @@ const API_BASE = import.meta.env.VITE_API_URL || (import.meta.env.DEV ? "http://
 
 // Vercel serverless functions reject bodies over ~4.5 MB.
 const MAX_UPLOAD_BYTES = 4 * 1024 * 1024;
-
-// Document history is stored in the browser only (localStorage) — there is
-// no account system, so this is per-device, not synced across devices.
-const HISTORY_KEY = "study-app:history";
-const HISTORY_LIMIT = 8;
-
-function loadHistory() {
-  try {
-    const raw = localStorage.getItem(HISTORY_KEY);
-    const parsed = raw ? JSON.parse(raw) : [];
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
-}
-
-function saveHistory(entries) {
-  // Drop the oldest entries first if storage quota is exceeded (e.g. large
-  // document_context strings), rather than losing the whole history.
-  let toStore = entries;
-  while (toStore.length > 0) {
-    try {
-      localStorage.setItem(HISTORY_KEY, JSON.stringify(toStore));
-      return toStore;
-    } catch {
-      toStore = toStore.slice(0, -1);
-    }
-  }
-  try {
-    localStorage.removeItem(HISTORY_KEY);
-  } catch {
-    // ignore — storage may be unavailable (e.g. private browsing)
-  }
-  return [];
-}
 
 const MOCK = {
   title: "Chapter 6 — Memory & Learning",
@@ -115,37 +83,181 @@ const STEPS = [
   { id: "tutor", label: "Tutor", icon: MessageCircle },
 ];
 
+function friendlyAuthError(code) {
+  switch (code) {
+    case "auth/invalid-email":
+      return "That doesn't look like a valid email address.";
+    case "auth/invalid-credential":
+    case "auth/wrong-password":
+    case "auth/user-not-found":
+      return "Incorrect email or password.";
+    case "auth/too-many-requests":
+      return "Too many attempts. Please wait a moment and try again.";
+    default:
+      return "Something went wrong. Please try again.";
+  }
+}
+
+function AuthScreen({ blockedMessage }) {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  const submit = async (e) => {
+    e.preventDefault();
+    setError("");
+    setBusy(true);
+    try {
+      await signInWithEmailAndPassword(auth, email, password);
+    } catch (err) {
+      setError(friendlyAuthError(err.code));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <main className="upload-wrap" style={styles.uploadWrap}>
+      <p style={styles.eyebrow}>Upload once · study every way</p>
+      <h1 className="hero-title" style={styles.h1}>
+        Turn any document into a<br />
+        <span style={styles.h1accent}>study session.</span>
+      </h1>
+      <p className="hero-sub" style={styles.sub}>
+        This app is invite-only. Sign in with your account to continue.
+      </p>
+      <form onSubmit={submit} style={styles.authForm}>
+        <h2 style={styles.authTitle}>Sign in</h2>
+        <input
+          style={styles.chatInput}
+          type="email"
+          required
+          placeholder="Email"
+          autoComplete="email"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+        />
+        <input
+          style={styles.chatInput}
+          type="password"
+          required
+          minLength={6}
+          placeholder="Password"
+          autoComplete="current-password"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+        />
+        {(error || blockedMessage) && <p style={styles.errorText}>{error || blockedMessage}</p>}
+        <button
+          type="submit"
+          style={{ ...styles.primaryBtn, width: "100%", justifyContent: "center", opacity: busy ? 0.6 : 1 }}
+          disabled={busy}
+        >
+          {busy ? "Please wait…" : "Sign in"}
+        </button>
+      </form>
+    </main>
+  );
+}
+
 export default function StudyMVP() {
+  // undefined = still checking the session, null = signed out
+  const [user, setUser] = useState(undefined);
   const [stage, setStage] = useState("upload");
   const [tab, setTab] = useState("summary");
   const [fileName, setFileName] = useState("");
   const [loading, setLoading] = useState(false);
   const [doc, setDoc] = useState(null);
   const [error, setError] = useState("");
-  const [history, setHistory] = useState(() => loadHistory());
+  const [history, setHistory] = useState([]);
+  const [profile, setProfile] = useState(null);
+  const [blockedMessage, setBlockedMessage] = useState("");
   const fileRef = useRef(null);
+
+  useEffect(() => onAuthStateChanged(auth, setUser), []);
+
+  const authedFetch = async (path, options = {}) => {
+    const token = await auth.currentUser.getIdToken();
+    const res = await fetch(`${API_BASE}${path}`, {
+      ...options,
+      headers: { ...(options.headers || {}), Authorization: `Bearer ${token}` },
+    });
+    if (res.status === 403) {
+      const data = await res.clone().json().catch(() => null);
+      setBlockedMessage(data?.detail || "You don't have access to this app.");
+      await signOut(auth);
+    }
+    return res;
+  };
+
+  const refreshHistory = async () => {
+    try {
+      const res = await authedFetch("/api/documents");
+      const data = await res.json().catch(() => null);
+      if (res.ok) setHistory(data.documents);
+    } catch {
+      // best-effort — history list isn't critical path
+    }
+  };
+
+  const refreshProfile = async () => {
+    try {
+      const res = await authedFetch("/api/profile");
+      const data = await res.json().catch(() => null);
+      if (res.ok) setProfile(data);
+    } catch {
+      // best-effort
+    }
+  };
+
+  useEffect(() => {
+    if (user) {
+      setBlockedMessage("");
+      refreshHistory();
+      refreshProfile();
+    } else {
+      setHistory([]);
+      setProfile(null);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user]);
 
   const openHistoryEntry = (entry) => {
     setError("");
-    setFileName(entry.fileName);
+    setFileName(entry.file_name);
     setDoc({
       title: entry.title,
       summary: entry.summary,
       quiz: entry.quiz,
       podcast: entry.podcast,
-      documentContext: entry.documentContext,
-      docFileName: entry.fileName,
+      // History only stores derived study data, never the document text, so
+      // Tutor chat needs the PDF re-uploaded to be grounded again.
+      documentContext: null,
+      docFileName: entry.file_name,
     });
     setStage("study");
     setTab("summary");
   };
 
-  const deleteHistoryEntry = (id, e) => {
+  const deleteHistoryEntry = async (id, e) => {
     e.stopPropagation();
-    setHistory((prev) => saveHistory(prev.filter((h) => h.id !== id)));
+    setHistory((prev) => prev.filter((h) => h.id !== id));
+    try {
+      await authedFetch(`/api/documents/${id}`, { method: "DELETE" });
+    } catch {
+      refreshHistory();
+    }
   };
 
-  const clearAllHistory = () => setHistory(saveHistory([]));
+  const clearAllHistory = async () => {
+    setHistory([]);
+    try {
+      await authedFetch("/api/documents", { method: "DELETE" });
+    } catch {
+      refreshHistory();
+    }
+  };
 
   const startUpload = async (file) => {
     setError("");
@@ -155,7 +267,7 @@ export default function StudyMVP() {
       setFileName("psychology-ch6.pdf");
       setLoading(true);
       setTimeout(() => {
-        setDoc({ ...MOCK, documentContext: null });
+        setDoc({ ...MOCK, documentContext: null, docFileName: null });
         setLoading(false);
         setStage("study");
         setTab("summary");
@@ -173,10 +285,7 @@ export default function StudyMVP() {
     try {
       const form = new FormData();
       form.append("file", file);
-      const res = await fetch(`${API_BASE}/api/pdf/analyze`, {
-        method: "POST",
-        body: form,
-      });
+      const res = await authedFetch("/api/pdf/analyze", { method: "POST", body: form });
       const data = await res.json().catch(() => null);
       if (!res.ok) {
         throw new Error(data?.detail || `The study service returned an error (${res.status}).`);
@@ -189,21 +298,8 @@ export default function StudyMVP() {
         documentContext: data.document_context,
         docFileName: data.file_name,
       });
-      setHistory((prev) =>
-        saveHistory([
-          {
-            id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-            createdAt: new Date().toISOString(),
-            fileName: data.file_name,
-            title: data.title,
-            summary: data.summary,
-            quiz: data.quiz,
-            podcast: data.podcast,
-            documentContext: data.document_context,
-          },
-          ...prev,
-        ].slice(0, HISTORY_LIMIT))
-      );
+      refreshHistory();
+      refreshProfile();
       setStage("study");
       setTab("summary");
     } catch (err) {
@@ -217,6 +313,34 @@ export default function StudyMVP() {
     }
   };
 
+  if (user === undefined) {
+    return (
+      <div className="app-shell" style={styles.app}>
+        <style>{css}</style>
+        <main style={{ ...styles.uploadWrap, alignItems: "center", justifyContent: "center" }}>
+          <div className="spinner" />
+        </main>
+      </div>
+    );
+  }
+
+  if (!user) {
+    return (
+      <div className="app-shell" style={styles.app}>
+        <style>{css}</style>
+        <header className="app-header" style={styles.header}>
+          <div style={styles.brand}>
+            <div style={styles.logoMark}>
+              <BookOpen size={18} strokeWidth={2.4} />
+            </div>
+            <span style={styles.brandName}>Marrow</span>
+          </div>
+        </header>
+        <AuthScreen blockedMessage={blockedMessage} />
+      </div>
+    );
+  }
+
   return (
     <div className="app-shell" style={styles.app}>
       <style>{css}</style>
@@ -227,11 +351,21 @@ export default function StudyMVP() {
           </div>
           <span style={styles.brandName}>Marrow</span>
         </div>
-        {stage === "study" && (
-          <button style={styles.resetBtn} onClick={() => setStage("upload")}>
-            <RotateCcw size={14} /> New upload
+        <div style={styles.headerRight}>
+          {profile && (
+            <span style={styles.usageBadge}>
+              {profile.usage_today}/{profile.daily_limit} today
+            </span>
+          )}
+          {stage === "study" && (
+            <button style={styles.resetBtn} onClick={() => setStage("upload")}>
+              <RotateCcw size={14} /> New upload
+            </button>
+          )}
+          <button style={styles.resetBtn} onClick={() => signOut(auth)} title={user.email}>
+            <LogOut size={14} /> Sign out
           </button>
-        )}
+        </div>
       </header>
 
       {stage === "upload" ? (
@@ -246,7 +380,7 @@ export default function StudyMVP() {
           onClearHistory={clearAllHistory}
         />
       ) : (
-        <StudyScreen tab={tab} setTab={setTab} fileName={fileName} doc={doc} />
+        <StudyScreen tab={tab} setTab={setTab} fileName={fileName} doc={doc} authedFetch={authedFetch} />
       )}
     </div>
   );
@@ -345,13 +479,13 @@ function UploadScreen({ loading, onUpload, fileRef, error, history, onOpenHistor
                 <FileText size={15} style={{ color: muted, flexShrink: 0 }} />
                 <div style={styles.historyMeta}>
                   <p style={styles.historyDocTitle}>{entry.title}</p>
-                  <p style={styles.historyFileName}>{entry.fileName}</p>
+                  <p style={styles.historyFileName}>{entry.file_name}</p>
                 </div>
-                <span style={styles.historyDate}>{formatHistoryDate(entry.createdAt)}</span>
+                <span style={styles.historyDate}>{formatHistoryDate(entry.created_at)}</span>
                 <button
                   style={styles.historyDelete}
                   onClick={(e) => onDeleteHistory(entry.id, e)}
-                  aria-label={`Remove ${entry.fileName} from history`}
+                  aria-label={`Remove ${entry.file_name} from history`}
                 >
                   <X size={14} />
                 </button>
@@ -364,7 +498,7 @@ function UploadScreen({ loading, onUpload, fileRef, error, history, onOpenHistor
   );
 }
 
-function StudyScreen({ tab, setTab, fileName, doc }) {
+function StudyScreen({ tab, setTab, fileName, doc, authedFetch }) {
   return (
     <main className="study-wrap" style={styles.studyWrap}>
       <div className="doc-header" style={styles.docHeader}>
@@ -395,8 +529,10 @@ function StudyScreen({ tab, setTab, fileName, doc }) {
       <section className="panel" style={styles.panel}>
         {tab === "summary" && <SummaryPanel doc={doc} />}
         {tab === "quiz" && <QuizPanel doc={doc} />}
-        {tab === "podcast" && <PodcastPanel doc={doc} />}
-        {tab === "tutor" && <TutorPanel documentContext={doc.documentContext} docFileName={doc.docFileName} />}
+        {tab === "podcast" && <PodcastPanel doc={doc} authedFetch={authedFetch} />}
+        {tab === "tutor" && (
+          <TutorPanel documentContext={doc.documentContext} docFileName={doc.docFileName} authedFetch={authedFetch} />
+        )}
       </section>
     </main>
   );
@@ -501,7 +637,7 @@ function QuizPanel({ doc }) {
   );
 }
 
-function PodcastPanel({ doc }) {
+function PodcastPanel({ doc, authedFetch }) {
   const { duration, hosts, transcript } = doc.podcast;
   const [playing, setPlaying] = useState(false);
   const [elapsed, setElapsed] = useState(0);
@@ -551,7 +687,7 @@ function PodcastPanel({ doc }) {
         while (next < transcript.length) {
           const i = next++;
           const seg = transcript[i];
-          const res = await fetch(`${API_BASE}/api/podcast/segment-audio`, {
+          const res = await authedFetch("/api/podcast/segment-audio", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ text: seg.line, speaker: seg.who === hosts[0] ? 0 : 1 }),
@@ -739,7 +875,7 @@ function PodcastPanel({ doc }) {
   );
 }
 
-function TutorPanel({ documentContext, docFileName }) {
+function TutorPanel({ documentContext, docFileName, authedFetch }) {
   const [msgs, setMsgs] = useState([
     {
       role: "tutor",
@@ -757,14 +893,16 @@ function TutorPanel({ documentContext, docFileName }) {
     setInput("");
 
     if (!documentContext) {
-      // Sample mode: no uploaded document to ground answers in.
+      // No document text retained for this doc (sample mode, or reopened
+      // from history where only derived data is stored) — nothing to
+      // ground real answers in.
       setTimeout(() => {
         setMsgs((m) => [
           ...m,
           {
             role: "tutor",
             text:
-              "Based on your notes: spaced repetition works because each review happens just as you're about to forget, which forces effortful retrieval and strengthens the memory. (This is a demo response — upload your own PDF to chat with the AI tutor.)",
+              "Based on your notes: spaced repetition works because each review happens just as you're about to forget, which forces effortful retrieval and strengthens the memory. (This is a demo response — upload the PDF again to chat with the real AI tutor about it.)",
           },
         ]);
       }, 700);
@@ -773,7 +911,7 @@ function TutorPanel({ documentContext, docFileName }) {
 
     setBusy(true);
     try {
-      const res = await fetch(`${API_BASE}/api/chat`, {
+      const res = await authedFetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -941,6 +1079,45 @@ const styles = {
     border: "1px solid #f2cfc5",
     borderRadius: 10,
     padding: "10px 16px",
+  },
+  authForm: {
+    marginTop: 28,
+    width: "min(360px, 100%)",
+    display: "grid",
+    gap: 10,
+    background: "#fff",
+    border: `1px solid ${line}`,
+    borderRadius: 18,
+    padding: "28px 24px",
+    textAlign: "left",
+  },
+  authTitle: {
+    fontFamily: "'Fraunces', Georgia, serif",
+    fontSize: 20,
+    fontWeight: 600,
+    margin: "0 0 6px",
+    textAlign: "center",
+  },
+  authSwitch: {
+    marginTop: 4,
+    background: "transparent",
+    border: "none",
+    color: muted,
+    fontSize: 13,
+    cursor: "pointer",
+    fontFamily: "inherit",
+    textAlign: "center",
+  },
+  headerRight: { display: "flex", alignItems: "center", gap: 10 },
+  usageBadge: {
+    fontSize: 12,
+    color: muted,
+    background: "#fff",
+    border: `1px solid ${line}`,
+    borderRadius: 20,
+    padding: "5px 12px",
+    fontVariantNumeric: "tabular-nums",
+    whiteSpace: "nowrap",
   },
   sampleBtn: {
     marginTop: 22,

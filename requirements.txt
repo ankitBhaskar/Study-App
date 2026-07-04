@@ -5,3 +5,4 @@ pypdf>=5.1
 pydantic>=2.12
 httpx>=0.28
 python-dotenv>=1.0
+firebase-admin>=6.5
