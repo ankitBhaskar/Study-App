@@ -34,6 +34,7 @@ Study-App/
 ├── vercel.json           # Routes /api/* to the Python function
 ├── .env.example          # Local-dev API key template
 ├── gemini_response_contract.json
+├── API_INTEGRATIONS.md   # Every external API call: prompts, file/line, request/response shapes
 └── README.md
 ```
 
