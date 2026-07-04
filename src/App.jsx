@@ -421,7 +421,17 @@ export default function StudyMVP() {
           onClearHistory={clearAllHistory}
         />
       ) : (
-        <StudyScreen tab={tab} setTab={setTab} fileName={fileName} doc={doc} authedFetch={authedFetch} />
+        <StudyScreen
+          tab={tab}
+          setTab={setTab}
+          fileName={fileName}
+          doc={doc}
+          authedFetch={authedFetch}
+          history={history}
+          onOpenHistory={openHistoryEntry}
+          onDeleteHistory={deleteHistoryEntry}
+          onClearHistory={clearAllHistory}
+        />
       )}
     </div>
   );
@@ -435,112 +445,146 @@ function formatHistoryDate(iso) {
     : d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
+function HistoryList({ history, onOpenHistory, onDeleteHistory, onClearHistory, activeId }) {
+  return (
+    <div className="history-box" style={styles.historyBox}>
+      <div style={styles.historyHead}>
+        <span style={styles.historyTitle}>
+          <Clock size={13} /> Recent documents
+        </span>
+        <button style={styles.historyClear} onClick={onClearHistory}>
+          Clear all
+        </button>
+      </div>
+      <div style={styles.historyList}>
+        {history.map((entry) => {
+          const active = entry.id === activeId;
+          return (
+            <div
+              key={entry.id}
+              className="history-item"
+              style={{ ...styles.historyItem, ...(active ? styles.historyItemActive : null) }}
+              onClick={() => onOpenHistory(entry)}
+            >
+              <FileText size={15} style={{ color: active ? moss : muted, flexShrink: 0 }} />
+              <div style={styles.historyMeta}>
+                <p style={styles.historyDocTitle}>{entry.title}</p>
+                <p style={styles.historyFileName}>{entry.file_name}</p>
+              </div>
+              <span style={styles.historyDate}>{formatHistoryDate(entry.created_at)}</span>
+              <button
+                style={styles.historyDelete}
+                onClick={(e) => onDeleteHistory(entry.id, e)}
+                aria-label={`Remove ${entry.file_name} from history`}
+              >
+                <X size={14} />
+              </button>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function UploadScreen({ loading, onUpload, fileRef, error, history, onOpenHistory, onDeleteHistory, onClearHistory }) {
   const [drag, setDrag] = useState(false);
+  const hasHistory = !loading && history.length > 0;
 
   return (
-    <main className="upload-wrap" style={styles.uploadWrap}>
-      <p style={styles.eyebrow}>Upload once · study every way</p>
-      <h1 className="hero-title" style={styles.h1}>
-        Turn any document into a<br />
-        <span style={styles.h1accent}>study session.</span>
-      </h1>
-      <p className="hero-sub" style={styles.sub}>
-        Drop in your lecture notes or slides. Get a clean summary, a quiz that
-        finds your weak spots, and a tutor that only knows your material.
-      </p>
-
-      <div
-        className={`dropzone ${drag ? "drag" : ""} ${loading ? "loading" : ""}`}
-        onDragOver={(e) => {
-          e.preventDefault();
-          setDrag(true);
-        }}
-        onDragLeave={() => setDrag(false)}
-        onDrop={(e) => {
-          e.preventDefault();
-          setDrag(false);
-          const f = e.dataTransfer.files?.[0];
-          if (f) onUpload(f);
-        }}
-        onClick={() => !loading && fileRef.current?.click()}
-        role="button"
-        tabIndex={0}
-      >
-        <input
-          ref={fileRef}
-          type="file"
-          accept=".pdf,application/pdf"
-          hidden
-          onChange={(e) => {
-            const f = e.target.files?.[0];
-            if (f) onUpload(f);
-            e.target.value = "";
-          }}
-        />
-        {loading ? (
-          <div style={styles.loadingBox}>
-            <div className="spinner" />
-            <p style={styles.loadingText}>Reading your document…</p>
-            <p style={styles.loadingSub}>Generating summary & quiz</p>
-          </div>
-        ) : (
-          <>
-            <div style={styles.uploadIcon}>
-              <Upload size={26} strokeWidth={2} />
-            </div>
-            <p style={styles.dropTitle}>Drop a PDF here</p>
-            <p style={styles.dropSub}>or click to browse · PDF, slides, notes</p>
-            <p style={styles.dropLimit}>Max file size: 4 MB</p>
-          </>
-        )}
-      </div>
-
-      {!loading && error && <p style={styles.errorText}>{error}</p>}
-
-      {!loading && (
-        <button style={styles.sampleBtn} onClick={() => onUpload(null)}>
-          <FileText size={14} /> Try it with a sample document
-          <ArrowRight size={14} />
-        </button>
-      )}
-
-      {!loading && history.length > 0 && (
-        <div style={styles.historyBox}>
-          <div style={styles.historyHead}>
-            <span style={styles.historyTitle}>
-              <Clock size={13} /> Recent documents
-            </span>
-            <button style={styles.historyClear} onClick={onClearHistory}>
-              Clear all
-            </button>
-          </div>
-          <div style={styles.historyList}>
-            {history.map((entry) => (
-              <div key={entry.id} className="history-item" style={styles.historyItem} onClick={() => onOpenHistory(entry)}>
-                <FileText size={15} style={{ color: muted, flexShrink: 0 }} />
-                <div style={styles.historyMeta}>
-                  <p style={styles.historyDocTitle}>{entry.title}</p>
-                  <p style={styles.historyFileName}>{entry.file_name}</p>
-                </div>
-                <span style={styles.historyDate}>{formatHistoryDate(entry.created_at)}</span>
-                <button
-                  style={styles.historyDelete}
-                  onClick={(e) => onDeleteHistory(entry.id, e)}
-                  aria-label={`Remove ${entry.file_name} from history`}
-                >
-                  <X size={14} />
-                </button>
-              </div>
-            ))}
-          </div>
+    <main className={`upload-wrap ${hasHistory ? "has-history" : ""}`} style={styles.uploadWrap}>
+      {hasHistory && (
+        <div className="upload-history-col">
+          <HistoryList
+            history={history}
+            onOpenHistory={onOpenHistory}
+            onDeleteHistory={onDeleteHistory}
+            onClearHistory={onClearHistory}
+          />
         </div>
       )}
+
+      <div className="upload-hero-col">
+        <p style={styles.eyebrow}>Upload once · study every way</p>
+        <h1 className="hero-title" style={styles.h1}>
+          Turn any document into a<br />
+          <span style={styles.h1accent}>study session.</span>
+        </h1>
+        <p className="hero-sub" style={styles.sub}>
+          Drop in your lecture notes or slides. Get a clean summary, a quiz that
+          finds your weak spots, and a tutor that only knows your material.
+        </p>
+
+        <div
+          className={`dropzone ${drag ? "drag" : ""} ${loading ? "loading" : ""}`}
+          onDragOver={(e) => {
+            e.preventDefault();
+            setDrag(true);
+          }}
+          onDragLeave={() => setDrag(false)}
+          onDrop={(e) => {
+            e.preventDefault();
+            setDrag(false);
+            const f = e.dataTransfer.files?.[0];
+            if (f) onUpload(f);
+          }}
+          onClick={() => !loading && fileRef.current?.click()}
+          role="button"
+          tabIndex={0}
+        >
+          <input
+            ref={fileRef}
+            type="file"
+            accept=".pdf,application/pdf"
+            hidden
+            onChange={(e) => {
+              const f = e.target.files?.[0];
+              if (f) onUpload(f);
+              e.target.value = "";
+            }}
+          />
+          {loading ? (
+            <div style={styles.loadingBox}>
+              <div className="spinner" />
+              <p style={styles.loadingText}>Reading your document…</p>
+              <p style={styles.loadingSub}>Generating summary & quiz</p>
+            </div>
+          ) : (
+            <>
+              <div style={styles.uploadIcon}>
+                <Upload size={26} strokeWidth={2} />
+              </div>
+              <p style={styles.dropTitle}>Drop a PDF here</p>
+              <p style={styles.dropSub}>or click to browse · PDF, slides, notes</p>
+              <p style={styles.dropLimit}>Max file size: 4 MB</p>
+            </>
+          )}
+        </div>
+
+        {!loading && error && <p style={styles.errorText}>{error}</p>}
+
+        {!loading && (
+          <button style={styles.sampleBtn} onClick={() => onUpload(null)}>
+            <FileText size={14} /> Try it with a sample document
+            <ArrowRight size={14} />
+          </button>
+        )}
+      </div>
     </main>
   );
 }
 
-function StudyScreen({ tab, setTab, fileName, doc, authedFetch }) {
+function StudyScreen({
+  tab,
+  setTab,
+  fileName,
+  doc,
+  authedFetch,
+  history,
+  onOpenHistory,
+  onDeleteHistory,
+  onClearHistory,
+}) {
   return (
     <main className="study-wrap" style={styles.studyWrap}>
       <div className="doc-header" style={styles.docHeader}>
@@ -551,22 +595,36 @@ function StudyScreen({ tab, setTab, fileName, doc, authedFetch }) {
         <h2 className="doc-title" style={styles.docTitle}>{doc.title}</h2>
       </div>
 
-      <nav className="tabs" style={styles.tabs} aria-label="Study sections">
-        {STEPS.map((s) => {
-          const Icon = s.icon;
-          const active = tab === s.id;
-          return (
-            <button
-              key={s.id}
-              className={`tab ${active ? "active" : ""}`}
-              onClick={() => setTab(s.id)}
-            >
-              <Icon size={15} strokeWidth={2.2} />
-              {s.label}
-            </button>
-          );
-        })}
-      </nav>
+      <div className="study-sidebar">
+        <nav className="tabs" style={styles.tabs} aria-label="Study sections">
+          {STEPS.map((s) => {
+            const Icon = s.icon;
+            const active = tab === s.id;
+            return (
+              <button
+                key={s.id}
+                className={`tab ${active ? "active" : ""}`}
+                onClick={() => setTab(s.id)}
+              >
+                <Icon size={15} strokeWidth={2.2} />
+                {s.label}
+              </button>
+            );
+          })}
+        </nav>
+
+        {history.length > 0 && (
+          <div className="study-history-sidebar">
+            <HistoryList
+              history={history}
+              onOpenHistory={onOpenHistory}
+              onDeleteHistory={onDeleteHistory}
+              onClearHistory={onClearHistory}
+              activeId={doc.documentId}
+            />
+          </div>
+        )}
+      </div>
 
       <section className="panel" style={styles.panel}>
         {tab === "summary" && <SummaryPanel doc={doc} />}
@@ -1144,6 +1202,7 @@ const styles = {
     paddingBottom: 2,
   },
   historyBox: { marginTop: 40, width: "min(560px, 100%)", textAlign: "left" },
+  historyItemActive: { borderColor: moss, background: "#f0f5f1" },
   historyHead: {
     display: "flex",
     alignItems: "center",
@@ -1564,6 +1623,19 @@ button, input { -webkit-tap-highlight-color: transparent; }
 .history-item:hover { border-color: ${moss}; }
 .history-item button:hover { background: ${paper}; color: ${ink}; }
 
+.upload-hero-col {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+.upload-history-col {
+  width: 100%;
+  display: flex;
+  justify-content: center;
+}
+.study-history-sidebar { display: none; }
+
 .fade { animation: fade .35s ease; }
 @keyframes fade { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
 
@@ -1584,15 +1656,29 @@ button, input { -webkit-tap-highlight-color: transparent; }
     grid-column: 1 / -1;
   }
 
-  .tabs {
+  .study-sidebar {
     grid-column: 1;
     grid-row: 2;
+    position: sticky;
+    top: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 24px;
+    max-height: calc(100vh - 40px);
+    overflow-y: auto;
+  }
+
+  .study-history-sidebar {
+    display: block;
+    border-top: 1px solid ${line};
+    padding-top: 20px;
+  }
+
+  .tabs {
     display: grid !important;
     gap: 8px !important;
     border-bottom: 0 !important;
     overflow: visible !important;
-    position: sticky;
-    top: 20px;
   }
 
   .tab {
@@ -1614,6 +1700,34 @@ button, input { -webkit-tap-highlight-color: transparent; }
   .panel {
     grid-column: 2;
     grid-row: 2;
+  }
+
+  .upload-wrap.has-history {
+    display: grid !important;
+    grid-template-columns: minmax(240px, 300px) minmax(0, 1fr);
+    column-gap: clamp(28px, 4vw, 56px);
+    align-items: start !important;
+    justify-content: initial !important;
+    padding-top: clamp(36px, 6vw, 72px) !important;
+  }
+
+  .upload-wrap.has-history .upload-hero-col {
+    grid-column: 2;
+    grid-row: 1;
+  }
+
+  .upload-wrap.has-history .upload-history-col {
+    grid-column: 1;
+    grid-row: 1;
+    display: block;
+    width: auto;
+    position: sticky;
+    top: 20px;
+  }
+
+  .upload-wrap.has-history .history-box,
+  .study-history-sidebar .history-box {
+    width: 100% !important;
   }
 }
 
