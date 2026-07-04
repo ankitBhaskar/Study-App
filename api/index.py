@@ -54,7 +54,7 @@ USING_FIREBASE_EMULATOR = bool(os.getenv("FIRESTORE_EMULATOR_HOST") or os.getenv
 # Shared daily cap across document analysis, tutor chat and podcast audio —
 # the three actions that call a paid API. One counter keeps this simple;
 # split it into separate counters later if different limits are needed.
-DAILY_USAGE_LIMIT = int(os.getenv("DAILY_USAGE_LIMIT", "5"))
+DAILY_USAGE_LIMIT = int(os.getenv("DAILY_USAGE_LIMIT", "100"))
 # Comma-separated allowlist of emails permitted to use the app. Empty means
 # unrestricted — set this to lock the app down to specific accounts.
 ALLOWED_EMAILS = {e.strip().lower() for e in os.getenv("ALLOWED_EMAILS", "").split(",") if e.strip()}

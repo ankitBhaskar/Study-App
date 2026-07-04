@@ -60,7 +60,7 @@ In Vercel: your project → **Settings → Environment Variables**:
 - `GEMINI_MODEL` — optional, defaults to `gemini-2.5-flash`
 - `ELEVENLABS_MODEL` — optional, defaults to `eleven_multilingual_v2`
 - `ELEVENLABS_VOICE_HOST_A` / `ELEVENLABS_VOICE_HOST_B` — optional voice IDs for the two hosts (default: Rachel and Adam)
-- `DAILY_USAGE_LIMIT` — optional, defaults to `5`; caps document analyses, chat messages and audio-segment generations per user per day, combined
+- `DAILY_USAGE_LIMIT` — optional, defaults to `100`; caps document analyses, chat messages and audio-segment generations per user per day, combined
 - `ALLOWED_EMAILS` — optional, comma-separated list (e.g. `you@example.com`). Leave unset to allow any account that exists in your Firebase project; set it to lock the app to specific emails only. Enforced server-side on every request, so it applies regardless of how a Firebase account was created.
 
 Then **redeploy** (Deployments → ⋯ → Redeploy) — env var changes only take effect on the next deployment. Verify at `https://<your-app>.vercel.app/api/health`: `gemini_key_configured`, `elevenlabs_key_configured` and `firebase_configured` should all be `true`.
