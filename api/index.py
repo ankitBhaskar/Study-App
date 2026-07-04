@@ -48,6 +48,10 @@ ELEVENLABS_VOICE_HOST_A = os.getenv("ELEVENLABS_VOICE_HOST_A")
 ELEVENLABS_VOICE_HOST_B = os.getenv("ELEVENLABS_VOICE_HOST_B")
 ELEVENLABS_TIMEOUT_SECONDS = 55.0
 MAX_SEGMENT_TEXT_CHARS = 1_000
+# Bound the persisted tutor transcript so it can't grow past Firestore's
+# 1 MiB document cap: keep the most recent messages, each text truncated.
+MAX_STORED_CHAT_MESSAGES = 60
+MAX_STORED_CHAT_TEXT_BYTES = 10_000
 # Firestore caps a document at 1 MiB (1,048,576 bytes) including every field;
 # 900 KB of text leaves ~120 KB of headroom for the study data stored with it.
 MAX_STORED_CONTEXT_BYTES = 900_000
@@ -159,6 +163,19 @@ class ChatRequest(BaseModel):
 
 class ChatResponse(BaseModel):
     answer: str
+
+
+class ChatMessage(BaseModel):
+    role: str
+    text: str
+
+
+class ChatLogRequest(BaseModel):
+    messages: list[ChatMessage] = []
+
+
+class ChatLogResponse(BaseModel):
+    messages: list[ChatMessage]
 
 
 class SegmentAudioRequest(BaseModel):
@@ -368,6 +385,17 @@ def save_segment_audio(uid: str, doc_id: str, segment_index: int, audio_bytes: b
     # of how large the stored extracted text on the parent already is.
     _audio_segment_ref(db, uid, doc_id, segment_index).set(
         {"data": base64.b64encode(audio_bytes).decode("ascii")}
+    )
+
+
+def _chat_log_ref(db, uid: str, doc_id: str):
+    return (
+        db.collection("users")
+        .document(uid)
+        .collection("documents")
+        .document(doc_id)
+        .collection("chat")
+        .document("log")
     )
 
 
@@ -783,9 +811,12 @@ async def get_document(doc_id: str, user: AuthedUser = Depends(require_user)) ->
 
 def _delete_document_and_audio(doc_ref) -> None:
     # Firestore doesn't cascade-delete subcollections, so the cached audio
-    # segments would otherwise be orphaned (unreachable but still stored).
+    # segments and saved tutor chat would otherwise be orphaned (unreachable
+    # but still stored).
     for audio_doc in doc_ref.collection("audio").stream():
         audio_doc.reference.delete()
+    for chat_doc in doc_ref.collection("chat").stream():
+        chat_doc.reference.delete()
     doc_ref.delete()
 
 
@@ -914,6 +945,37 @@ async def chat(request: ChatRequest, user: AuthedUser = Depends(require_user)) -
     answer = await call_gemini(system_instruction, contents, json_response=False)
     increment_usage(user.uid)
     return ChatResponse(answer=answer.strip())
+
+
+@app.get("/api/documents/{doc_id}/chat", response_model=ChatLogResponse)
+async def get_chat_log(doc_id: str, user: AuthedUser = Depends(require_user)) -> ChatLogResponse:
+    # Returns the saved tutor conversation for this document so it can be
+    # restored on the next visit. Empty when nothing has been saved yet.
+    db = get_firestore_client()
+    if db is None:
+        return ChatLogResponse(messages=[])
+    snapshot = _chat_log_ref(db, user.uid, doc_id).get()
+    if not snapshot.exists:
+        return ChatLogResponse(messages=[])
+    data = snapshot.to_dict() or {}
+    return ChatLogResponse(messages=[ChatMessage(**m) for m in data.get("messages", [])])
+
+
+@app.put("/api/documents/{doc_id}/chat", response_model=ChatLogResponse)
+async def save_chat_log(
+    doc_id: str, request: ChatLogRequest, user: AuthedUser = Depends(require_user)
+) -> ChatLogResponse:
+    # Persisting chat is storage only — no paid API call, so it doesn't touch
+    # the usage limit. Keep only the most recent messages, each text bounded,
+    # so the stored transcript stays well under Firestore's 1 MiB cap.
+    messages = [
+        ChatMessage(role=m.role, text=truncate_utf8(m.text, MAX_STORED_CHAT_TEXT_BYTES))
+        for m in request.messages[-MAX_STORED_CHAT_MESSAGES:]
+    ]
+    db = get_firestore_client()
+    if db is not None:
+        _chat_log_ref(db, user.uid, doc_id).set({"messages": [m.model_dump() for m in messages]})
+    return ChatLogResponse(messages=messages)
 
 
 @app.get("/api/podcast/audio-status/{doc_id}", response_model=AudioStatusResponse)

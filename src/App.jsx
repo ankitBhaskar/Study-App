@@ -575,6 +575,7 @@ function StudyScreen({ tab, setTab, fileName, doc, authedFetch }) {
         {tab === "tutor" && (
           <TutorPanel
             documentContext={doc.documentContext}
+            documentId={doc.documentId}
             docFileName={doc.docFileName}
             fromHistory={doc.fromHistory}
             authedFetch={authedFetch}
@@ -943,23 +944,56 @@ function PodcastPanel({ doc, documentId, authedFetch }) {
   );
 }
 
-function TutorPanel({ documentContext, docFileName, fromHistory, authedFetch }) {
+function TutorPanel({ documentContext, documentId, docFileName, fromHistory, authedFetch }) {
   const historyNotice =
     `I can show this document's summary, quiz and podcast, but its text wasn't saved ` +
     `(it was analyzed before text storage was added). ` +
     `Re-upload "${docFileName || "the PDF"}" and I can answer questions about it again.`;
 
-  const [msgs, setMsgs] = useState([
-    {
-      role: "tutor",
-      text:
-        fromHistory && !documentContext
-          ? historyNotice
-          : "Ask me anything about this document. I'll only answer from what you uploaded.",
-    },
-  ]);
+  const greeting =
+    fromHistory && !documentContext
+      ? historyNotice
+      : "Ask me anything about this document. I'll only answer from what you uploaded.";
+
+  const [msgs, setMsgs] = useState([{ role: "tutor", text: greeting }]);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
+
+  // Restore the saved conversation for this document on open, so the tutor
+  // picks up where it left off last time. Only replaces the opening greeting
+  // (msgs untouched once a conversation is already in progress).
+  useEffect(() => {
+    if (!documentId) return undefined;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await authedFetch(`/api/documents/${documentId}/chat`);
+        if (!res.ok) return;
+        const data = await res.json().catch(() => null);
+        const saved = (data && data.messages) || [];
+        if (!cancelled && saved.length > 0) {
+          setMsgs((m) => (m.length <= 1 ? [{ role: "tutor", text: greeting }, ...saved] : m));
+        }
+      } catch {
+        // best-effort — no saved chat to restore
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [documentId]);
+
+  // Persist the conversation (without the opening greeting) so it survives a
+  // reload. Storage only — best-effort, and never blocks the chat.
+  const persistChat = (messages) => {
+    if (!documentId) return;
+    authedFetch(`/api/documents/${documentId}/chat`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ messages: messages.slice(1) }),
+    }).catch(() => {});
+  };
 
   const send = async () => {
     if (!input.trim() || busy) return;
@@ -1001,7 +1035,12 @@ function TutorPanel({ documentContext, docFileName, fromHistory, authedFetch }) 
       const answer = res.ok
         ? data.answer
         : data?.detail || `The tutor is unavailable right now (error ${res.status}).`;
-      setMsgs((m) => [...m, { role: "tutor", text: answer }]);
+      setMsgs((m) => {
+        const updated = [...m, { role: "tutor", text: answer }];
+        // Only persist real tutor answers, not transient service errors.
+        if (res.ok) persistChat(updated);
+        return updated;
+      });
     } catch {
       setMsgs((m) => [
         ...m,
