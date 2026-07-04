@@ -234,6 +234,7 @@ export default function StudyMVP() {
       // History only stores derived study data, never the document text, so
       // Tutor chat needs the PDF re-uploaded to be grounded again.
       documentContext: null,
+      fromHistory: true,
       docFileName: entry.file_name,
     });
     setStage("study");
@@ -531,7 +532,12 @@ function StudyScreen({ tab, setTab, fileName, doc, authedFetch }) {
         {tab === "quiz" && <QuizPanel doc={doc} />}
         {tab === "podcast" && <PodcastPanel doc={doc} authedFetch={authedFetch} />}
         {tab === "tutor" && (
-          <TutorPanel documentContext={doc.documentContext} docFileName={doc.docFileName} authedFetch={authedFetch} />
+          <TutorPanel
+            documentContext={doc.documentContext}
+            docFileName={doc.docFileName}
+            fromHistory={doc.fromHistory}
+            authedFetch={authedFetch}
+          />
         )}
       </section>
     </main>
@@ -875,11 +881,18 @@ function PodcastPanel({ doc, authedFetch }) {
   );
 }
 
-function TutorPanel({ documentContext, docFileName, authedFetch }) {
+function TutorPanel({ documentContext, docFileName, fromHistory, authedFetch }) {
+  const historyNotice =
+    `I can show this document's summary, quiz and podcast, but I no longer have its text — ` +
+    `history saves only the generated study material, not the document itself. ` +
+    `Re-upload "${docFileName || "the PDF"}" and I can answer questions about it again.`;
+
   const [msgs, setMsgs] = useState([
     {
       role: "tutor",
-      text: "Ask me anything about this document. I'll only answer from what you uploaded.",
+      text: fromHistory
+        ? historyNotice
+        : "Ask me anything about this document. I'll only answer from what you uploaded.",
     },
   ]);
   const [input, setInput] = useState("");
@@ -893,16 +906,16 @@ function TutorPanel({ documentContext, docFileName, authedFetch }) {
     setInput("");
 
     if (!documentContext) {
-      // No document text retained for this doc (sample mode, or reopened
-      // from history where only derived data is stored) — nothing to
-      // ground real answers in.
+      // No document text retained: either sample mode (canned demo answer)
+      // or reopened from history (be honest — don't fake an answer).
       setTimeout(() => {
         setMsgs((m) => [
           ...m,
           {
             role: "tutor",
-            text:
-              "Based on your notes: spaced repetition works because each review happens just as you're about to forget, which forces effortful retrieval and strengthens the memory. (This is a demo response — upload the PDF again to chat with the real AI tutor about it.)",
+            text: fromHistory
+              ? historyNotice
+              : "Based on your notes: spaced repetition works because each review happens just as you're about to forget, which forces effortful retrieval and strengthens the memory. (This is a demo response — upload your own PDF to chat with the real AI tutor.)",
           },
         ]);
       }, 700);
