@@ -171,6 +171,10 @@ class SegmentAudioRequest(BaseModel):
     segment_index: int | None = None
 
 
+class AudioStatusResponse(BaseModel):
+    cached_segments: list[int]
+
+
 class AuthedUser(BaseModel):
     uid: str
     email: str | None = None
@@ -365,6 +369,29 @@ def save_segment_audio(uid: str, doc_id: str, segment_index: int, audio_bytes: b
     _audio_segment_ref(db, uid, doc_id, segment_index).set(
         {"data": base64.b64encode(audio_bytes).decode("ascii")}
     )
+
+
+def list_cached_segment_indices(uid: str, doc_id: str) -> list[int]:
+    db = get_firestore_client()
+    if db is None:
+        return []
+    audio_ref = (
+        db.collection("users")
+        .document(uid)
+        .collection("documents")
+        .document(doc_id)
+        .collection("audio")
+    )
+    indices = []
+    # Projecting to __name__ returns only the document IDs (the segment
+    # indices), so the base64 audio payloads aren't downloaded just to
+    # report which segments are cached.
+    for snapshot in audio_ref.select(["__name__"]).stream():
+        try:
+            indices.append(int(snapshot.id))
+        except ValueError:
+            continue
+    return sorted(indices)
 
 
 def check_usage_limit(uid: str) -> None:
@@ -887,6 +914,16 @@ async def chat(request: ChatRequest, user: AuthedUser = Depends(require_user)) -
     answer = await call_gemini(system_instruction, contents, json_response=False)
     increment_usage(user.uid)
     return ChatResponse(answer=answer.strip())
+
+
+@app.get("/api/podcast/audio-status/{doc_id}", response_model=AudioStatusResponse)
+async def podcast_audio_status(
+    doc_id: str, user: AuthedUser = Depends(require_user)
+) -> AudioStatusResponse:
+    # Lets the frontend restore the player after a reload: it reports which
+    # segments already have saved audio so cached playback needs no new
+    # ElevenLabs calls (and no usage-limit hits).
+    return AudioStatusResponse(cached_segments=list_cached_segment_indices(user.uid, doc_id))
 
 
 @app.post("/api/podcast/segment-audio")

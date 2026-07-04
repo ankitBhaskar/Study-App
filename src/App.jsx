@@ -691,57 +691,115 @@ function PodcastPanel({ doc, documentId, authedFetch }) {
   // simulated/fake playback — the player only appears once real audio
   // exists, so the play button never implies audio that isn't there.
   const [audioState, setAudioState] = useState("idle");
-  const [audioUrls, setAudioUrls] = useState([]);
   const [genProgress, setGenProgress] = useState(0);
   const [audioError, setAudioError] = useState("");
   const [playing, setPlaying] = useState(false);
   const [playingIdx, setPlayingIdx] = useState(0);
   const [segProgress, setSegProgress] = useState(0);
   const audioRef = useRef(null);
+  // Blob URLs for each segment, indexed by position. Populated eagerly by
+  // generateAudio and lazily (from cache) during playback, so it lives in a
+  // ref rather than state — playback reads it without forcing re-renders.
+  const urlsRef = useRef([]);
+
+  const revokeUrls = () => {
+    urlsRef.current.forEach((u) => u && URL.revokeObjectURL(u));
+    urlsRef.current = [];
+  };
+
+  // On mount / when switching documents: reset the player, then ask the
+  // backend whether saved audio already exists for this document. If every
+  // segment is cached, restore the player straight to "ready" — cached
+  // playback costs no ElevenLabs calls, so this survives page reloads.
+  useEffect(() => {
+    let cancelled = false;
+    audioRef.current?.pause();
+    revokeUrls();
+    setPlaying(false);
+    setPlayingIdx(0);
+    setSegProgress(0);
+    setGenProgress(0);
+    setAudioError("");
+    setAudioState("idle");
+
+    if (!documentId || transcript.length === 0) return undefined;
+
+    (async () => {
+      try {
+        const res = await authedFetch(`/api/podcast/audio-status/${documentId}`);
+        if (!res.ok) return;
+        const data = await res.json();
+        const cached = new Set(data.cached_segments || []);
+        // Only restore when the whole episode is cached, so playback never
+        // stalls partway through on a segment that was never generated.
+        const complete = transcript.every((_, i) => cached.has(i));
+        if (!cancelled && complete) {
+          urlsRef.current = new Array(transcript.length).fill(null);
+          setAudioState("ready");
+        }
+      } catch {
+        // No saved audio reachable — leave the Generate button in place.
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [documentId]);
 
   useEffect(() => {
     return () => {
       audioRef.current?.pause();
+      revokeUrls();
     };
   }, []);
+
+  // Fetch (or reuse) the blob URL for one segment. A cache hit on the backend
+  // returns instantly and is free; only genuinely new audio calls ElevenLabs.
+  const ensureSegmentUrl = async (i) => {
+    if (urlsRef.current[i]) return urlsRef.current[i];
+    const seg = transcript[i];
+    const res = await authedFetch("/api/podcast/segment-audio", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        text: seg.line,
+        speaker: seg.who === hosts[0] ? 0 : 1,
+        // Lets the backend cache/reuse generated audio for this exact
+        // document + segment instead of paying for it again next time.
+        document_id: documentId || null,
+        segment_index: i,
+      }),
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => null);
+      throw new Error(data?.detail || `The audio service returned an error (${res.status}).`);
+    }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    urlsRef.current[i] = url;
+    return url;
+  };
 
   const generateAudio = async () => {
     setAudioState("generating");
     setAudioError("");
     setGenProgress(0);
     try {
-      const urls = new Array(transcript.length);
+      urlsRef.current = new Array(transcript.length).fill(null);
       let next = 0;
       let done = 0;
       // ElevenLabs free tier allows 2 concurrent requests.
       const worker = async () => {
         while (next < transcript.length) {
           const i = next++;
-          const seg = transcript[i];
-          const res = await authedFetch("/api/podcast/segment-audio", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              text: seg.line,
-              speaker: seg.who === hosts[0] ? 0 : 1,
-              // Lets the backend cache/reuse generated audio for this exact
-              // document + segment instead of paying for it again next time.
-              document_id: documentId || null,
-              segment_index: i,
-            }),
-          });
-          if (!res.ok) {
-            const data = await res.json().catch(() => null);
-            throw new Error(data?.detail || `The audio service returned an error (${res.status}).`);
-          }
-          const blob = await res.blob();
-          urls[i] = URL.createObjectURL(blob);
+          await ensureSegmentUrl(i);
           done += 1;
           setGenProgress(done);
         }
       };
       await Promise.all([worker(), worker()]);
-      setAudioUrls(urls);
       setPlayingIdx(0);
       setSegProgress(0);
       setAudioState("ready");
@@ -753,15 +811,25 @@ function PodcastPanel({ doc, documentId, authedFetch }) {
     }
   };
 
-  const playSegment = (i, urls = audioUrls) => {
-    if (!urls[i]) return;
+  const playSegment = async (i) => {
+    let url;
+    try {
+      url = await ensureSegmentUrl(i);
+    } catch (err) {
+      setPlaying(false);
+      setAudioError(
+        err instanceof TypeError ? "Could not reach the audio service. Please try again in a moment." : err.message
+      );
+      setAudioState("error");
+      return;
+    }
     if (!audioRef.current) audioRef.current = new Audio();
     const a = audioRef.current;
-    a.src = urls[i];
+    a.src = url;
     a.ontimeupdate = () => setSegProgress(a.duration ? a.currentTime / a.duration : 0);
     a.onended = () => {
-      if (i + 1 < urls.length) {
-        playSegment(i + 1, urls);
+      if (i + 1 < transcript.length) {
+        playSegment(i + 1);
       } else {
         setPlaying(false);
         setPlayingIdx(0);
