@@ -7,7 +7,7 @@ A React/Vite study app that turns an uploaded PDF into a study workflow: Gemini-
 - Firebase email/password login — uploading, chat and podcast audio require an account, with no public sign-up form
 - Optional email allowlist (`ALLOWED_EMAILS`) to restrict the app to specific accounts only
 - Per-user daily usage limit on AI actions (analyze / chat / audio), enforced server-side
-- Document history stored per-account in Firestore (title, summary, quiz, podcast script only — never the PDF or its extracted text) with reopen/delete/clear-all
+- Document history stored per-account in Firestore (title, summary, quiz, podcast script and the extracted text — never the PDF file itself) with reopen/delete/clear-all; Tutor chat works on reopened documents
 - Responsive document upload screen with drag-and-drop interaction
 - Real PDF upload → Gemini analysis producing summary, quiz and podcast script
 - Interactive quiz with scoring and weak-topic feedback
@@ -102,7 +102,8 @@ Then run the backend with `FIREBASE_PROJECT_ID=demo-study-app FIRESTORE_EMULATOR
 - `POST /api/chat` — ask the tutor a question scoped to the uploaded document (`{document_context, file_name, question, history}`). Requires sign-in and `GEMINI_API_KEY`; counts against the daily usage limit.
 - `POST /api/podcast/segment-audio` — turn one transcript segment into speech (`{text, speaker}` where speaker is 0 or 1); returns MP3 audio. Requires sign-in and `ELEVENLABS_API_KEY`; counts against the daily usage limit. The frontend calls this once per segment and plays them back-to-back, keeping each response well under Vercel's size limits.
 - `GET /api/profile` — the signed-in user's email, account creation date, and today's usage vs. the daily limit.
-- `GET /api/documents` — the signed-in user's document history (up to 50, newest first).
+- `GET /api/documents` — the signed-in user's document history (up to 50, newest first; metadata and study data only).
+- `GET /api/documents/{id}` — one history document including its stored extracted text, used to re-enable Tutor chat when reopening.
 - `DELETE /api/documents/{id}` / `DELETE /api/documents` — delete one document or clear all history.
 - `POST /api/pdf/prepare` — extract, clean and chunk PDF text and return a Gemini-ready payload without calling Gemini. No sign-in needed.
 - `GET /api/health` — reports service status and whether Gemini, ElevenLabs and Firebase are configured, plus whether `ALLOWED_EMAILS` is restricting access.
@@ -125,7 +126,7 @@ The expected Gemini output shape is documented in `gemini_response_contract.json
 
 - Upload limit is 4 MB — Vercel serverless functions reject larger request bodies.
 - Serverless functions keep no state between requests, so the browser holds the extracted document text and sends it with each tutor-chat message.
-- Document history stores only derived data (title, summary, quiz, podcast script) — never the PDF or its extracted text. Reopening a document from history works for Summary/Quiz/Podcast, but Tutor chat needs the PDF re-uploaded since no grounding text was retained.
+- Document history stores the derived study data plus the extracted text (truncated to fit Firestore's 1 MiB document cap) — the PDF file itself is never stored. All four tabs, including Tutor chat, work when reopening a document from history. Documents analyzed before text storage was added show a re-upload notice in the Tutor tab.
 - Scanned (image-only) PDFs need OCR first; the API returns a clear error for them.
 - There's no public sign-up form — new accounts are created manually in the Firebase Console (Authentication → Users). Hiding the sign-up button is UX only; the real access control is the server-side `ALLOWED_EMAILS` check, since Firebase's public API key means anyone could otherwise call Firebase's own sign-up endpoint directly.
 - If a signed-in account isn't on `ALLOWED_EMAILS`, every API call returns 403 and the frontend immediately signs them out with a clear message rather than leaving them stuck in a broken logged-in state.

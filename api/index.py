@@ -45,6 +45,9 @@ ELEVENLABS_VOICE_HOST_A = os.getenv("ELEVENLABS_VOICE_HOST_A")
 ELEVENLABS_VOICE_HOST_B = os.getenv("ELEVENLABS_VOICE_HOST_B")
 ELEVENLABS_TIMEOUT_SECONDS = 55.0
 MAX_SEGMENT_TEXT_CHARS = 1_000
+# Firestore caps a document at 1 MiB; leave room for the study data fields
+# when persisting the extracted text alongside them.
+MAX_STORED_CONTEXT_BYTES = 700_000
 FIREBASE_PROJECT_ID = os.getenv("FIREBASE_PROJECT_ID")
 FIREBASE_CLIENT_EMAIL = os.getenv("FIREBASE_CLIENT_EMAIL")
 FIREBASE_PRIVATE_KEY = os.getenv("FIREBASE_PRIVATE_KEY")
@@ -179,6 +182,10 @@ class DocumentRecord(BaseModel):
     podcast: Podcast
 
 
+class DocumentDetail(DocumentRecord):
+    document_context: str = ""
+
+
 class DocumentListResponse(BaseModel):
     documents: list[DocumentRecord]
 
@@ -305,6 +312,13 @@ async def require_user(authorization: str | None = Header(default=None)) -> Auth
 
 def _today_key() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+def truncate_utf8(text: str, max_bytes: int) -> str:
+    encoded = text.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return text
+    return encoded[:max_bytes].decode("utf-8", errors="ignore")
 
 
 def check_usage_limit(uid: str) -> None:
@@ -652,6 +666,9 @@ async def list_documents(user: AuthedUser = Depends(require_user)) -> DocumentLi
         db.collection("users")
         .document(user.uid)
         .collection("documents")
+        # Field mask keeps the potentially-large document_context out of the
+        # list query; it's fetched per-document via GET /api/documents/{id}.
+        .select(["title", "file_name", "created_at", "summary", "quiz", "podcast"])
         .order_by("created_at", direction=firestore.Query.DESCENDING)
         .limit(50)
     )
@@ -670,6 +687,25 @@ async def list_documents(user: AuthedUser = Depends(require_user)) -> DocumentLi
             )
         )
     return DocumentListResponse(documents=records)
+
+
+@app.get("/api/documents/{doc_id}", response_model=DocumentDetail)
+async def get_document(doc_id: str, user: AuthedUser = Depends(require_user)) -> DocumentDetail:
+    db = get_firestore_client()
+    snapshot = db.collection("users").document(user.uid).collection("documents").document(doc_id).get()
+    if not snapshot.exists:
+        raise HTTPException(status_code=404, detail="Document not found.")
+    data = snapshot.to_dict() or {}
+    return DocumentDetail(
+        id=snapshot.id,
+        title=data.get("title", "Untitled"),
+        file_name=data.get("file_name", ""),
+        created_at=data.get("created_at", ""),
+        summary=data.get("summary", []),
+        quiz=[QuizQuestion(**q) for q in data.get("quiz", [])],
+        podcast=Podcast(**data.get("podcast", {"duration": "0:00", "hosts": [], "transcript": []})),
+        document_context=data.get("document_context", ""),
+    )
 
 
 @app.delete("/api/documents/{doc_id}")
@@ -736,8 +772,9 @@ async def analyze_pdf(file: UploadFile = File(...), user: AuthedUser = Depends(r
     increment_usage(user.uid)
     db = get_firestore_client()
     if db is not None:
-        # Only the derived study data is persisted — never the PDF or the
-        # extracted document text — per the "data, not the document" design.
+        # The PDF file itself is never stored — only the extracted text
+        # (truncated to fit Firestore's 1 MiB document cap) and the derived
+        # study data, so Tutor chat keeps working on history-reopened docs.
         db.collection("users").document(user.uid).collection("documents").add(
             {
                 "title": title,
@@ -745,6 +782,7 @@ async def analyze_pdf(file: UploadFile = File(...), user: AuthedUser = Depends(r
                 "summary": summary,
                 "quiz": [q.model_dump() for q in quiz],
                 "podcast": podcast.model_dump(),
+                "document_context": truncate_utf8(context, MAX_STORED_CONTEXT_BYTES),
                 "created_at": datetime.now(timezone.utc).isoformat(),
             }
         )

@@ -223,20 +223,33 @@ export default function StudyMVP() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user]);
 
-  const openHistoryEntry = (entry) => {
+  const openHistoryEntry = async (entry) => {
     setError("");
     setFileName(entry.file_name);
+    setLoading(true);
+
+    // The history list is metadata-only; the stored document text is
+    // fetched per-document so Tutor chat works on reopened documents.
+    // Entries saved before text storage existed simply come back empty.
+    let context = null;
+    try {
+      const res = await authedFetch(`/api/documents/${entry.id}`);
+      const data = await res.json().catch(() => null);
+      if (res.ok && data.document_context) context = data.document_context;
+    } catch {
+      // fall through — tutor shows the re-upload notice instead
+    }
+
     setDoc({
       title: entry.title,
       summary: entry.summary,
       quiz: entry.quiz,
       podcast: entry.podcast,
-      // History only stores derived study data, never the document text, so
-      // Tutor chat needs the PDF re-uploaded to be grounded again.
-      documentContext: null,
+      documentContext: context,
       fromHistory: true,
       docFileName: entry.file_name,
     });
+    setLoading(false);
     setStage("study");
     setTab("summary");
   };
@@ -883,16 +896,17 @@ function PodcastPanel({ doc, authedFetch }) {
 
 function TutorPanel({ documentContext, docFileName, fromHistory, authedFetch }) {
   const historyNotice =
-    `I can show this document's summary, quiz and podcast, but I no longer have its text — ` +
-    `history saves only the generated study material, not the document itself. ` +
+    `I can show this document's summary, quiz and podcast, but its text wasn't saved ` +
+    `(it was analyzed before text storage was added). ` +
     `Re-upload "${docFileName || "the PDF"}" and I can answer questions about it again.`;
 
   const [msgs, setMsgs] = useState([
     {
       role: "tutor",
-      text: fromHistory
-        ? historyNotice
-        : "Ask me anything about this document. I'll only answer from what you uploaded.",
+      text:
+        fromHistory && !documentContext
+          ? historyNotice
+          : "Ask me anything about this document. I'll only answer from what you uploaded.",
     },
   ]);
   const [input, setInput] = useState("");
