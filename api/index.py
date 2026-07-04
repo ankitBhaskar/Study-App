@@ -35,9 +35,14 @@ GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 GEMINI_TIMEOUT_SECONDS = 55.0
 ELEVENLABS_API_BASE = os.getenv("ELEVENLABS_API_BASE", "https://api.elevenlabs.io/v1")
 ELEVENLABS_MODEL = os.getenv("ELEVENLABS_MODEL", "eleven_multilingual_v2")
-# Premade ElevenLabs voices: Rachel (host A) and Adam (host B).
-ELEVENLABS_VOICE_HOST_A = os.getenv("ELEVENLABS_VOICE_HOST_A", "21m00Tcm4TlvDq8ikWAM")
-ELEVENLABS_VOICE_HOST_B = os.getenv("ELEVENLABS_VOICE_HOST_B", "pNInz6obpgDQGcFmaJgB")
+# Optional explicit overrides. Left unset, the two host voices are resolved
+# at runtime from GET /v1/voices — free-tier ElevenLabs accounts get a 402
+# calling the text-to-speech endpoint with a "voice library" ID that isn't
+# already in their own account, so hardcoding well-known IDs (e.g. the
+# premade Rachel/Adam voices) breaks for exactly those accounts. Reading the
+# account's own voice list guarantees whatever we pick is actually usable.
+ELEVENLABS_VOICE_HOST_A = os.getenv("ELEVENLABS_VOICE_HOST_A")
+ELEVENLABS_VOICE_HOST_B = os.getenv("ELEVENLABS_VOICE_HOST_B")
 ELEVENLABS_TIMEOUT_SECONDS = 55.0
 MAX_SEGMENT_TEXT_CHARS = 1_000
 FIREBASE_PROJECT_ID = os.getenv("FIREBASE_PROJECT_ID")
@@ -184,6 +189,41 @@ def get_gemini_api_key() -> str | None:
 
 def get_elevenlabs_api_key() -> str | None:
     return os.getenv("ELEVENLABS_API_KEY")
+
+
+_cached_voice_ids: tuple[str, str] | None = None
+
+
+async def resolve_voice_ids(api_key: str) -> tuple[str, str]:
+    global _cached_voice_ids
+
+    if ELEVENLABS_VOICE_HOST_A and ELEVENLABS_VOICE_HOST_B:
+        return ELEVENLABS_VOICE_HOST_A, ELEVENLABS_VOICE_HOST_B
+    if _cached_voice_ids:
+        return _cached_voice_ids
+
+    async with httpx.AsyncClient(timeout=ELEVENLABS_TIMEOUT_SECONDS) as client:
+        try:
+            response = await client.get(f"{ELEVENLABS_API_BASE}/voices", headers={"xi-api-key": api_key})
+        except httpx.HTTPError as exc:
+            raise HTTPException(status_code=502, detail=f"Could not reach the ElevenLabs API: {exc}") from exc
+
+    if response.status_code != 200:
+        raise HTTPException(status_code=502, detail=f"Could not list ElevenLabs voices ({response.status_code}).")
+
+    voices = response.json().get("voices") or []
+    if len(voices) < 2:
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "Your ElevenLabs account has fewer than two voices available via the API. "
+                "Add voices in the ElevenLabs dashboard (Voice Library → Add to my voices), "
+                "or set ELEVENLABS_VOICE_HOST_A/ELEVENLABS_VOICE_HOST_B to specific voice IDs you own."
+            ),
+        )
+
+    _cached_voice_ids = (voices[0]["voice_id"], voices[1]["voice_id"])
+    return _cached_voice_ids
 
 
 def firebase_configured() -> bool:
@@ -776,7 +816,8 @@ async def podcast_segment_audio(
     if len(text) > MAX_SEGMENT_TEXT_CHARS:
         raise HTTPException(status_code=400, detail="Segment text is too long for audio generation.")
 
-    voice_id = ELEVENLABS_VOICE_HOST_A if request.speaker == 0 else ELEVENLABS_VOICE_HOST_B
+    voice_a, voice_b = await resolve_voice_ids(api_key)
+    voice_id = voice_a if request.speaker == 0 else voice_b
     url = f"{ELEVENLABS_API_BASE}/text-to-speech/{voice_id}"
 
     async with httpx.AsyncClient(timeout=ELEVENLABS_TIMEOUT_SECONDS) as client:
