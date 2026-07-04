@@ -491,6 +491,7 @@ function UploadScreen({ loading, onUpload, fileRef, error, history, onOpenHistor
             </div>
             <p style={styles.dropTitle}>Drop a PDF here</p>
             <p style={styles.dropSub}>or click to browse · PDF, slides, notes</p>
+            <p style={styles.dropLimit}>Max file size: 4 MB</p>
           </>
         )}
       </div>
@@ -1075,6 +1076,7 @@ const styles = {
   },
   dropTitle: { margin: 0, fontWeight: 600, fontSize: 17 },
   dropSub: { margin: 0, fontSize: 13.5, color: muted },
+  dropLimit: { margin: "6px 0 0", fontSize: 12, color: muted, opacity: 0.75 },
   errorText: {
     marginTop: 18,
     marginBottom: 0,
