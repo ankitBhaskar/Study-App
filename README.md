@@ -10,7 +10,7 @@ A React/Vite study app that turns an uploaded PDF into a study workflow: Gemini-
 - Document history stored per-account in Firestore (title, summary, quiz, podcast script and the extracted text — never the PDF file itself) with reopen/delete/clear-all; Tutor chat works on reopened documents
 - Responsive document upload screen with drag-and-drop interaction
 - Real PDF upload → Gemini analysis producing summary, quiz and podcast script
-- Interactive quiz with scoring and weak-topic feedback
+- Interactive quiz with scoring and weak-topic feedback; generate a fresh, non-repeating set of questions on demand, and every attempt is saved so past scores and answers can be reviewed later
 - Podcast player with generated transcript
 - AI podcast audio: two distinct ElevenLabs voices read the generated script; once generated for a document, audio is cached in Firestore and reused free on later visits instead of calling ElevenLabs again
 - Chat and summary text render markdown (bold, lists, etc.) instead of showing raw asterisks

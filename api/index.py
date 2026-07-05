@@ -55,6 +55,10 @@ MAX_STORED_CHAT_TEXT_BYTES = 10_000
 # Firestore caps a document at 1 MiB (1,048,576 bytes) including every field;
 # 900 KB of text leaves ~120 KB of headroom for the study data stored with it.
 MAX_STORED_CONTEXT_BYTES = 900_000
+# Keep only the most recent quiz attempts per document, and only look at a
+# bounded number of past questions when asking Gemini to avoid repeats.
+MAX_QUIZ_ATTEMPTS = 20
+MAX_AVOID_QUESTIONS = 30
 FIREBASE_PROJECT_ID = os.getenv("FIREBASE_PROJECT_ID")
 FIREBASE_CLIENT_EMAIL = os.getenv("FIREBASE_CLIENT_EMAIL")
 FIREBASE_PRIVATE_KEY = os.getenv("FIREBASE_PRIVATE_KEY")
@@ -176,6 +180,28 @@ class ChatLogRequest(BaseModel):
 
 class ChatLogResponse(BaseModel):
     messages: list[ChatMessage]
+
+
+class QuizAttemptRequest(BaseModel):
+    questions: list[QuizQuestion]
+    answers: list[int]
+
+
+class QuizAttempt(BaseModel):
+    id: str
+    questions: list[QuizQuestion]
+    answers: list[int]
+    score: int
+    total: int
+    created_at: str
+
+
+class QuizAttemptListResponse(BaseModel):
+    attempts: list[QuizAttempt]
+
+
+class QuizRegenerateResponse(BaseModel):
+    quiz: list[QuizQuestion]
 
 
 class SegmentAudioRequest(BaseModel):
@@ -397,6 +423,77 @@ def _chat_log_ref(db, uid: str, doc_id: str):
         .collection("chat")
         .document("log")
     )
+
+
+def _quiz_attempts_ref(db, uid: str, doc_id: str):
+    return (
+        db.collection("users")
+        .document(uid)
+        .collection("documents")
+        .document(doc_id)
+        .collection("quiz_attempts")
+    )
+
+
+def save_quiz_attempt(uid: str, doc_id: str, questions: list[QuizQuestion], answers: list[int]) -> QuizAttempt:
+    # Score is derived here from each question's own correct-answer index,
+    # never trusted from the caller.
+    score = sum(1 for q, a in zip(questions, answers) if a == q.answer)
+    created_at = datetime.now(timezone.utc).isoformat()
+
+    db = get_firestore_client()
+    if db is None:
+        return QuizAttempt(id="", questions=questions, answers=answers, score=score, total=len(questions), created_at=created_at)
+
+    attempts_ref = _quiz_attempts_ref(db, uid, doc_id)
+    _, doc_ref = attempts_ref.add(
+        {
+            "questions": [q.model_dump() for q in questions],
+            "answers": answers,
+            "score": score,
+            "total": len(questions),
+            "created_at": created_at,
+        }
+    )
+    # Bound the history the same way the chat log is bounded, just as
+    # separate documents instead of a single truncated array: keep only the
+    # most recent MAX_QUIZ_ATTEMPTS attempts.
+    stale = list(
+        attempts_ref.order_by("created_at", direction=firestore.Query.DESCENDING)
+        .offset(MAX_QUIZ_ATTEMPTS)
+        .stream()
+    )
+    for extra in stale:
+        extra.reference.delete()
+
+    return QuizAttempt(
+        id=doc_ref.id, questions=questions, answers=answers, score=score, total=len(questions), created_at=created_at
+    )
+
+
+def list_quiz_attempts(uid: str, doc_id: str) -> list[QuizAttempt]:
+    db = get_firestore_client()
+    if db is None:
+        return []
+    query = (
+        _quiz_attempts_ref(db, uid, doc_id)
+        .order_by("created_at", direction=firestore.Query.DESCENDING)
+        .limit(MAX_QUIZ_ATTEMPTS)
+    )
+    attempts = []
+    for snapshot in query.stream():
+        data = snapshot.to_dict() or {}
+        attempts.append(
+            QuizAttempt(
+                id=snapshot.id,
+                questions=[QuizQuestion(**q) for q in data.get("questions", [])],
+                answers=data.get("answers", []),
+                score=data.get("score", 0),
+                total=data.get("total", 0),
+                created_at=data.get("created_at", ""),
+            )
+        )
+    return attempts
 
 
 def list_cached_segment_indices(uid: str, doc_id: str) -> list[int]:
@@ -640,17 +737,24 @@ Create 3 to 5 quiz questions. Create 8 to 12 podcast segments as a natural two-h
 with timestamps spread between 0:00 and 9:30 in mm:ss format. Everything must be grounded in the document content."""
 
 
-def normalise_study_content(raw: dict[str, Any], file_name: str) -> tuple[str, list[str], list[QuizQuestion], Podcast]:
-    title = str(raw.get("title") or file_name)
+QUIZ_SYSTEM_INSTRUCTION = """You are an expert study assistant. Use ONLY the uploaded document content provided by the user.
+Generate a fresh set of 3 to 5 multiple-choice quiz questions grounded in the document. Return a single JSON object with EXACTLY this shape (no markdown, no extra keys):
+{
+  "questions": [
+    {
+      "question": "string",
+      "options": ["exactly 4 answer options"],
+      "correctOptionIndex": 0,
+      "explanation": "why the answer is correct",
+      "topic": "short topic label"
+    }
+  ]
+}
+Do not repeat any question with the same meaning as one listed under "Questions already used" below — write genuinely
+different questions, ideally covering different parts of the document. Everything must be grounded in the document content."""
 
-    summary_raw = raw.get("summary")
-    if isinstance(summary_raw, dict):
-        summary_raw = summary_raw.get("detailedSummary") or [summary_raw.get("shortSummary", "")]
-    summary = [str(point) for point in summary_raw or [] if str(point).strip()]
-    if not summary:
-        raise HTTPException(status_code=502, detail="Gemini response did not include a usable summary.")
 
-    quiz_raw = raw.get("quiz") or {}
+def parse_quiz_questions(quiz_raw: Any) -> list[QuizQuestion]:
     questions_raw = quiz_raw.get("questions") if isinstance(quiz_raw, dict) else quiz_raw
     quiz: list[QuizQuestion] = []
     for item in questions_raw or []:
@@ -673,6 +777,20 @@ def normalise_study_content(raw: dict[str, Any], file_name: str) -> tuple[str, l
                 explanation=str(item.get("explanation") or ""),
             )
         )
+    return quiz
+
+
+def normalise_study_content(raw: dict[str, Any], file_name: str) -> tuple[str, list[str], list[QuizQuestion], Podcast]:
+    title = str(raw.get("title") or file_name)
+
+    summary_raw = raw.get("summary")
+    if isinstance(summary_raw, dict):
+        summary_raw = summary_raw.get("detailedSummary") or [summary_raw.get("shortSummary", "")]
+    summary = [str(point) for point in summary_raw or [] if str(point).strip()]
+    if not summary:
+        raise HTTPException(status_code=502, detail="Gemini response did not include a usable summary.")
+
+    quiz = parse_quiz_questions(raw.get("quiz") or {})
     if not quiz:
         raise HTTPException(status_code=502, detail="Gemini response did not include usable quiz questions.")
 
@@ -809,21 +927,25 @@ async def get_document(doc_id: str, user: AuthedUser = Depends(require_user)) ->
     )
 
 
-def _delete_document_and_audio(doc_ref) -> None:
-    # Firestore doesn't cascade-delete subcollections, so the cached audio
-    # segments and saved tutor chat would otherwise be orphaned (unreachable
-    # but still stored).
+def _delete_document_and_subcollections(doc_ref) -> None:
+    # Firestore doesn't cascade-delete subcollections, so cached audio,
+    # saved tutor chat and quiz-attempt history would otherwise be orphaned
+    # (unreachable but still stored).
     for audio_doc in doc_ref.collection("audio").stream():
         audio_doc.reference.delete()
     for chat_doc in doc_ref.collection("chat").stream():
         chat_doc.reference.delete()
+    for attempt_doc in doc_ref.collection("quiz_attempts").stream():
+        attempt_doc.reference.delete()
     doc_ref.delete()
 
 
 @app.delete("/api/documents/{doc_id}")
 async def delete_document(doc_id: str, user: AuthedUser = Depends(require_user)) -> dict[str, str]:
     db = get_firestore_client()
-    _delete_document_and_audio(db.collection("users").document(user.uid).collection("documents").document(doc_id))
+    _delete_document_and_subcollections(
+        db.collection("users").document(user.uid).collection("documents").document(doc_id)
+    )
     return {"status": "deleted"}
 
 
@@ -832,7 +954,7 @@ async def clear_documents(user: AuthedUser = Depends(require_user)) -> dict[str,
     db = get_firestore_client()
     docs_ref = db.collection("users").document(user.uid).collection("documents")
     for doc in docs_ref.stream():
-        _delete_document_and_audio(doc.reference)
+        _delete_document_and_subcollections(doc.reference)
     return {"status": "cleared"}
 
 
@@ -976,6 +1098,75 @@ async def save_chat_log(
     if db is not None:
         _chat_log_ref(db, user.uid, doc_id).set({"messages": [m.model_dump() for m in messages]})
     return ChatLogResponse(messages=messages)
+
+
+@app.get("/api/documents/{doc_id}/quiz/attempts", response_model=QuizAttemptListResponse)
+async def get_quiz_attempts(doc_id: str, user: AuthedUser = Depends(require_user)) -> QuizAttemptListResponse:
+    return QuizAttemptListResponse(attempts=list_quiz_attempts(user.uid, doc_id))
+
+
+@app.post("/api/documents/{doc_id}/quiz/attempts", response_model=QuizAttempt)
+async def post_quiz_attempt(
+    doc_id: str, request: QuizAttemptRequest, user: AuthedUser = Depends(require_user)
+) -> QuizAttempt:
+    if len(request.answers) != len(request.questions):
+        raise HTTPException(status_code=400, detail="answers must have one entry per question.")
+    # Storage only — recording a past attempt doesn't call any paid API, so
+    # it doesn't touch the usage limit.
+    return save_quiz_attempt(user.uid, doc_id, request.questions, request.answers)
+
+
+@app.post("/api/documents/{doc_id}/quiz/regenerate", response_model=QuizRegenerateResponse)
+async def regenerate_quiz(doc_id: str, user: AuthedUser = Depends(require_user)) -> QuizRegenerateResponse:
+    check_usage_limit(user.uid)
+
+    db = get_firestore_client()
+    doc_ref = db.collection("users").document(user.uid).collection("documents").document(doc_id)
+    snapshot = doc_ref.get()
+    if not snapshot.exists:
+        raise HTTPException(status_code=404, detail="Document not found.")
+    data = snapshot.to_dict() or {}
+    context = (data.get("document_context") or "").strip()[:MAX_GEMINI_CONTEXT_CHARS]
+    if not context:
+        raise HTTPException(
+            status_code=400,
+            detail="This document's text wasn't saved, so a new quiz can't be generated. Re-upload the PDF.",
+        )
+
+    # Ask Gemini to avoid repeating the current quiz and recent attempts, so
+    # "new questions" is actually a different set rather than a reshuffle.
+    avoid = [str(item.get("q") or "").strip() for item in data.get("quiz") or []]
+    avoid = [q for q in avoid if q]
+    for attempt in list_quiz_attempts(user.uid, doc_id)[:5]:
+        for q in attempt.questions:
+            if q.q not in avoid:
+                avoid.append(q.q)
+    avoid = avoid[:MAX_AVOID_QUESTIONS]
+    avoid_block = "\n".join(f"- {q}" for q in avoid) if avoid else "(none yet)"
+
+    contents = [
+        {
+            "role": "user",
+            "parts": [
+                {
+                    "text": (
+                        f"File name: {data.get('file_name', 'uploaded-document.pdf')}\n\n"
+                        f"Questions already used (avoid repeating these or close variants):\n{avoid_block}\n\n"
+                        "Document content:\n\n"
+                        f"{context}"
+                    )
+                }
+            ],
+        }
+    ]
+    raw_text = await call_gemini(QUIZ_SYSTEM_INSTRUCTION, contents, json_response=True)
+    quiz = parse_quiz_questions(parse_json_text(raw_text))
+    if not quiz:
+        raise HTTPException(status_code=502, detail="Gemini response did not include usable quiz questions.")
+
+    doc_ref.update({"quiz": [q.model_dump() for q in quiz]})
+    increment_usage(user.uid)
+    return QuizRegenerateResponse(quiz=quiz)
 
 
 @app.get("/api/podcast/audio-status/{doc_id}", response_model=AudioStatusResponse)

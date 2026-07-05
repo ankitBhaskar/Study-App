@@ -570,7 +570,7 @@ function StudyScreen({ tab, setTab, fileName, doc, authedFetch }) {
 
       <section className="panel" style={styles.panel}>
         {tab === "summary" && <SummaryPanel doc={doc} />}
-        {tab === "quiz" && <QuizPanel doc={doc} />}
+        {tab === "quiz" && <QuizPanel doc={doc} documentId={doc.documentId} authedFetch={authedFetch} />}
         {tab === "podcast" && <PodcastPanel doc={doc} documentId={doc.documentId} authedFetch={authedFetch} />}
         {tab === "tutor" && (
           <TutorPanel
@@ -602,13 +602,111 @@ function SummaryPanel({ doc }) {
   );
 }
 
-function QuizPanel({ doc }) {
+function QuizPanel({ doc, documentId, authedFetch }) {
+  // The active question set starts as whatever was stored with the
+  // document, but can be swapped for a freshly generated one without
+  // touching doc.quiz — regenerating never overwrites the attempt history.
+  const [quiz, setQuiz] = useState(doc.quiz);
   const [answers, setAnswers] = useState({});
   const [submitted, setSubmitted] = useState(false);
+  const [history, setHistory] = useState([]);
+  const [expandedAttempt, setExpandedAttempt] = useState(null);
+  const [regenerating, setRegenerating] = useState(false);
+  const [regenError, setRegenError] = useState("");
 
-  const quiz = doc.quiz;
+  useEffect(() => {
+    setQuiz(doc.quiz);
+    setAnswers({});
+    setSubmitted(false);
+    setRegenError("");
+  }, [doc, documentId]);
+
+  useEffect(() => {
+    if (!documentId) return undefined;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await authedFetch(`/api/documents/${documentId}/quiz/attempts`);
+        if (!res.ok) return;
+        const data = await res.json().catch(() => null);
+        if (!cancelled && data) setHistory(data.attempts || []);
+      } catch {
+        // best-effort — history just won't show
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [documentId]);
+
   const score = quiz.reduce((n, q, i) => (answers[i] === q.answer ? n + 1 : n), 0);
   const weak = quiz.filter((q, i) => answers[i] !== q.answer).map((q) => q.topic);
+
+  const submit = () => {
+    setSubmitted(true);
+    if (!documentId) return;
+    // Storage only — recording the attempt doesn't call any paid API.
+    authedFetch(`/api/documents/${documentId}/quiz/attempts`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ questions: quiz, answers: quiz.map((_, i) => answers[i]) }),
+    })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((attempt) => attempt && setHistory((h) => [attempt, ...h]))
+      .catch(() => {});
+  };
+
+  const retake = () => {
+    setAnswers({});
+    setSubmitted(false);
+  };
+
+  const regenerate = async () => {
+    setRegenerating(true);
+    setRegenError("");
+    try {
+      const res = await authedFetch(`/api/documents/${documentId}/quiz/regenerate`, { method: "POST" });
+      const data = await res.json().catch(() => null);
+      if (!res.ok) throw new Error(data?.detail || `Could not generate a new quiz (error ${res.status}).`);
+      setQuiz(data.quiz);
+      setAnswers({});
+      setSubmitted(false);
+    } catch (err) {
+      setRegenError(
+        err instanceof TypeError ? "Could not reach the quiz service. Please try again in a moment." : err.message
+      );
+    } finally {
+      setRegenerating(false);
+    }
+  };
+
+  const historySection = history.length > 0 && (
+    <div style={styles.quizHistory}>
+      <p style={styles.quizHistoryTitle}>Past attempts</p>
+      {history.map((a) => (
+        <div key={a.id} style={styles.attemptRow}>
+          <button style={styles.attemptHeader} onClick={() => setExpandedAttempt(expandedAttempt === a.id ? null : a.id)}>
+            <span>{formatHistoryDate(a.created_at)}</span>
+            <span>{a.score} / {a.total}</span>
+          </button>
+          {expandedAttempt === a.id && (
+            <div style={styles.attemptDetail}>
+              {a.questions.map((q, i) => {
+                const correct = a.answers[i] === q.answer;
+                return (
+                  <p key={i} style={{ ...styles.attemptQ, color: correct ? mossDeep : "#b03d2e" }}>
+                    Q{i + 1}. {q.q} — you answered "{q.options[a.answers[i]] ?? "—"}"
+                    {!correct && ` (correct: "${q.options[q.answer]}")`}
+                  </p>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+  );
 
   if (submitted) {
     return (
@@ -632,15 +730,19 @@ function QuizPanel({ doc }) {
         ) : (
           <p style={styles.resultSub}>You nailed every topic in this set.</p>
         )}
-        <button
-          style={styles.primaryBtn}
-          onClick={() => {
-            setAnswers({});
-            setSubmitted(false);
-          }}
-        >
-          <RotateCcw size={15} /> Retake quiz
-        </button>
+        <div style={styles.quizActionRow}>
+          <button style={styles.primaryBtn} onClick={retake}>
+            <RotateCcw size={15} /> Retake same quiz
+          </button>
+          {documentId && (
+            <button style={{ ...styles.audioBtn, opacity: regenerating ? 0.6 : 1 }} onClick={regenerate} disabled={regenerating}>
+              {regenerating ? <span className="spinner" style={{ width: 14, height: 14, borderWidth: 2 }} /> : <Sparkles size={14} />}
+              {regenerating ? "Generating…" : "New questions"}
+            </button>
+          )}
+        </div>
+        {regenError && <p style={{ ...styles.resultSub, color: "#b03d2e" }}>{regenError}</p>}
+        {historySection}
       </div>
     );
   }
@@ -677,10 +779,11 @@ function QuizPanel({ doc }) {
           opacity: Object.keys(answers).length === quiz.length ? 1 : 0.45,
         }}
         disabled={Object.keys(answers).length !== quiz.length}
-        onClick={() => setSubmitted(true)}
+        onClick={submit}
       >
         Check answers <ArrowRight size={15} />
       </button>
+      {historySection}
     </div>
   );
 }
@@ -1416,6 +1519,25 @@ const styles = {
     fontSize: 13,
     fontWeight: 500,
   },
+  quizActionRow: { display: "flex", flexWrap: "wrap", gap: 10, justifyContent: "center", marginTop: 4 },
+  quizHistory: { marginTop: 28, width: "100%", textAlign: "left" },
+  quizHistoryTitle: { fontSize: 12.5, fontWeight: 700, color: muted, letterSpacing: 0.3, marginBottom: 8 },
+  attemptRow: { borderTop: `1px solid ${line}`, padding: "8px 0" },
+  attemptHeader: {
+    display: "flex",
+    justifyContent: "space-between",
+    width: "100%",
+    background: "none",
+    border: "none",
+    padding: 0,
+    fontSize: 13.5,
+    fontFamily: "inherit",
+    color: ink,
+    cursor: "pointer",
+    fontVariantNumeric: "tabular-nums",
+  },
+  attemptDetail: { marginTop: 10, display: "grid", gap: 6 },
+  attemptQ: { fontSize: 13, lineHeight: 1.5, margin: 0 },
   tutorWrap: { display: "flex", flexDirection: "column", minHeight: 420, height: "calc(58svh - 40px)" },
   chatScroll: { flex: 1, overflowY: "auto", display: "flex", flexDirection: "column", gap: 12, paddingRight: 4 },
   bubble: { maxWidth: "82%", padding: "11px 15px", borderRadius: 14, fontSize: 14.5, lineHeight: 1.5 },
