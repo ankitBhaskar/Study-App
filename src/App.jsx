@@ -597,7 +597,9 @@ function SummaryPanel({ doc, documentId, authedFetch }) {
   const [summary, setSummary] = useState(doc.summary);
   const [length, setLength] = useState("concise");
   const [focus, setFocus] = useState("");
-  const [busy, setBusy] = useState(false);
+  // Which option is currently generating ("concise" / "detailed" / "focus"),
+  // so the spinner shows inside the control that was tapped.
+  const [busyWith, setBusyWith] = useState(null);
   const [error, setError] = useState("");
 
   useEffect(() => {
@@ -605,24 +607,29 @@ function SummaryPanel({ doc, documentId, authedFetch }) {
     setError("");
   }, [doc]);
 
-  const regenerate = async () => {
-    setBusy(true);
+  // One tap = generate. Tapping a length chip regenerates right away with
+  // that length (keeping any focus text); submitting the focus field
+  // regenerates with the current length.
+  const regenerate = async (nextLength, busyKey) => {
+    if (busyWith) return;
+    setBusyWith(busyKey);
     setError("");
     try {
       const res = await authedFetch(`/api/documents/${documentId}/summary/regenerate`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ length, focus: focus.trim() }),
+        body: JSON.stringify({ length: nextLength, focus: focus.trim() }),
       });
       const data = await res.json().catch(() => null);
       if (!res.ok) throw new Error(data?.detail || `Could not generate a new summary (error ${res.status}).`);
+      setLength(nextLength);
       setSummary(data.summary);
     } catch (err) {
       setError(
         err instanceof TypeError ? "Could not reach the study service. Please try again in a moment." : err.message
       );
     } finally {
-      setBusy(false);
+      setBusyWith(null);
     }
   };
 
@@ -640,30 +647,61 @@ function SummaryPanel({ doc, documentId, authedFetch }) {
 
       {documentId && (
         <div style={styles.regenBox}>
-          <p style={styles.regenLabel}>Regenerate with different options</p>
+          <p style={styles.regenLabel}>Tap a style to generate a new summary</p>
           <div style={styles.regenRow}>
             <div style={styles.segmentGroup}>
-              {SUMMARY_LENGTHS.map((opt) => (
-                <button
-                  key={opt.id}
-                  style={{ ...styles.segmentBtn, ...(length === opt.id ? styles.segmentBtnActive : {}) }}
-                  onClick={() => setLength(opt.id)}
-                >
-                  {opt.label}
-                </button>
-              ))}
+              {SUMMARY_LENGTHS.map((opt) => {
+                const isBusy = busyWith === opt.id;
+                return (
+                  <button
+                    key={opt.id}
+                    style={{
+                      ...styles.segmentBtn,
+                      ...(length === opt.id ? styles.segmentBtnActive : {}),
+                      opacity: busyWith && !isBusy ? 0.5 : 1,
+                    }}
+                    onClick={() => regenerate(opt.id, opt.id)}
+                    disabled={!!busyWith}
+                  >
+                    {isBusy && (
+                      <span
+                        className="spinner"
+                        style={{ width: 12, height: 12, borderWidth: 2, marginRight: 6, ...(length === opt.id ? { borderColor: "rgba(255,255,255,0.4)", borderTopColor: "#fff" } : {}) }}
+                      />
+                    )}
+                    {isBusy ? "Generating…" : opt.label}
+                  </button>
+                );
+              })}
             </div>
-            <input
-              style={styles.regenFocusInput}
-              placeholder="Focus on a topic (optional)"
-              value={focus}
-              onChange={(e) => setFocus(e.target.value)}
-              maxLength={200}
-            />
-            <button style={{ ...styles.audioBtn, opacity: busy ? 0.6 : 1 }} onClick={regenerate} disabled={busy}>
-              {busy ? <span className="spinner" style={{ width: 14, height: 14, borderWidth: 2 }} /> : <Sparkles size={14} />}
-              {busy ? "Generating…" : "Regenerate summary"}
-            </button>
+            <form
+              style={styles.focusForm}
+              onSubmit={(e) => {
+                e.preventDefault();
+                regenerate(length, "focus");
+              }}
+            >
+              <input
+                style={styles.regenFocusInput}
+                placeholder="Focus on a topic…"
+                value={focus}
+                onChange={(e) => setFocus(e.target.value)}
+                maxLength={200}
+                disabled={!!busyWith}
+              />
+              <button
+                type="submit"
+                style={{ ...styles.focusGoBtn, opacity: busyWith || !focus.trim() ? 0.5 : 1 }}
+                disabled={!!busyWith || !focus.trim()}
+                aria-label="Generate summary focused on this topic"
+              >
+                {busyWith === "focus" ? (
+                  <span className="spinner" style={{ width: 14, height: 14, borderWidth: 2 }} />
+                ) : (
+                  <Sparkles size={15} />
+                )}
+              </button>
+            </form>
           </div>
           {error && <p style={{ ...styles.resultSub, margin: "8px 0 0", color: "#b03d2e" }}>{error}</p>}
         </div>
@@ -871,7 +909,9 @@ function PodcastPanel({ doc, documentId, authedFetch }) {
   const { duration, hosts, transcript } = podcast;
 
   const [podcastStyle, setPodcastStyle] = useState("conversation");
-  const [scriptBusy, setScriptBusy] = useState(false);
+  // Style id currently being generated (null when idle) — the spinner shows
+  // inside the chip that was tapped, since tapping a chip IS the action.
+  const [scriptBusy, setScriptBusy] = useState(null);
   const [scriptError, setScriptError] = useState("");
 
   // AI audio state: idle → generating → ready (or error). There is no
@@ -899,14 +939,18 @@ function PodcastPanel({ doc, documentId, authedFetch }) {
     urlsRef.current = [];
   };
 
-  const regenerateScript = async () => {
-    setScriptBusy(true);
+  // Tapping a style chip is the whole flow: generate the new script in that
+  // style, then go straight into generating its audio — no separate
+  // "New script" / "Generate AI audio" taps needed.
+  const regenerateScript = async (style) => {
+    if (scriptBusy || audioState === "generating") return;
+    setScriptBusy(style);
     setScriptError("");
     try {
       const res = await authedFetch(`/api/documents/${documentId}/podcast/regenerate`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ style: podcastStyle }),
+        body: JSON.stringify({ style }),
       });
       const data = await res.json().catch(() => null);
       if (!res.ok) throw new Error(data?.detail || `Could not generate a new script (error ${res.status}).`);
@@ -920,13 +964,18 @@ function PodcastPanel({ doc, documentId, authedFetch }) {
       setSegProgress(0);
       setAudioError("");
       setAudioState("idle");
+      setPodcastStyle(style);
       setPodcast(data.podcast);
+      setScriptBusy(null);
+      // Chain straight into audio for the fresh script. Passing the new
+      // podcast explicitly — the `podcast` state variable in this closure
+      // still holds the previous script.
+      await generateAudioFor(data.podcast);
     } catch (err) {
+      setScriptBusy(null);
       setScriptError(
         err instanceof TypeError ? "Could not reach the study service. Please try again in a moment." : err.message
       );
-    } finally {
-      setScriptBusy(false);
     }
   };
 
@@ -980,15 +1029,17 @@ function PodcastPanel({ doc, documentId, authedFetch }) {
 
   // Fetch (or reuse) the blob URL for one segment. A cache hit on the backend
   // returns instantly and is free; only genuinely new audio calls ElevenLabs.
-  const ensureSegmentUrl = async (i) => {
+  // `pod` is passed explicitly where the caller may hold a fresher script
+  // than the `podcast` state in this render's closure.
+  const ensureSegmentUrl = async (i, pod = podcast) => {
     if (urlsRef.current[i]) return urlsRef.current[i];
-    const seg = transcript[i];
+    const seg = pod.transcript[i];
     const res = await authedFetch("/api/podcast/segment-audio", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         text: seg.line,
-        speaker: seg.who === hosts[0] ? 0 : 1,
+        speaker: seg.who === pod.hosts[0] ? 0 : 1,
         // Lets the backend cache/reuse generated audio for this exact
         // document + segment instead of paying for it again next time.
         document_id: documentId || null,
@@ -1005,19 +1056,19 @@ function PodcastPanel({ doc, documentId, authedFetch }) {
     return url;
   };
 
-  const generateAudio = async () => {
+  const generateAudioFor = async (pod) => {
     setAudioState("generating");
     setAudioError("");
     setGenProgress(0);
     try {
-      urlsRef.current = new Array(transcript.length).fill(null);
+      urlsRef.current = new Array(pod.transcript.length).fill(null);
       let next = 0;
       let done = 0;
       // ElevenLabs free tier allows 2 concurrent requests.
       const worker = async () => {
-        while (next < transcript.length) {
+        while (next < pod.transcript.length) {
           const i = next++;
-          await ensureSegmentUrl(i);
+          await ensureSegmentUrl(i, pod);
           done += 1;
           setGenProgress(done);
         }
@@ -1033,6 +1084,8 @@ function PodcastPanel({ doc, documentId, authedFetch }) {
       setAudioState("error");
     }
   };
+
+  const generateAudio = () => generateAudioFor(podcast);
 
   const playSegment = async (i) => {
     let url;
@@ -1096,23 +1149,33 @@ function PodcastPanel({ doc, documentId, authedFetch }) {
 
       {documentId && (
         <div style={styles.regenBox}>
-          <p style={styles.regenLabel}>Regenerate the script in a different style</p>
+          <p style={styles.regenLabel}>Tap a style to generate a new episode</p>
           <div style={styles.regenRow}>
             <div style={styles.segmentGroup}>
-              {PODCAST_STYLES.map((opt) => (
-                <button
-                  key={opt.id}
-                  style={{ ...styles.segmentBtn, ...(podcastStyle === opt.id ? styles.segmentBtnActive : {}) }}
-                  onClick={() => setPodcastStyle(opt.id)}
-                >
-                  {opt.label}
-                </button>
-              ))}
+              {PODCAST_STYLES.map((opt) => {
+                const isBusy = scriptBusy === opt.id;
+                return (
+                  <button
+                    key={opt.id}
+                    style={{
+                      ...styles.segmentBtn,
+                      ...(podcastStyle === opt.id ? styles.segmentBtnActive : {}),
+                      opacity: scriptBusy && !isBusy ? 0.5 : 1,
+                    }}
+                    onClick={() => regenerateScript(opt.id)}
+                    disabled={!!scriptBusy || audioState === "generating"}
+                  >
+                    {isBusy && (
+                      <span
+                        className="spinner"
+                        style={{ width: 12, height: 12, borderWidth: 2, marginRight: 6, ...(podcastStyle === opt.id ? { borderColor: "rgba(255,255,255,0.4)", borderTopColor: "#fff" } : {}) }}
+                      />
+                    )}
+                    {isBusy ? "Writing script…" : opt.label}
+                  </button>
+                );
+              })}
             </div>
-            <button style={{ ...styles.audioBtn, opacity: scriptBusy ? 0.6 : 1 }} onClick={regenerateScript} disabled={scriptBusy}>
-              {scriptBusy ? <span className="spinner" style={{ width: 14, height: 14, borderWidth: 2 }} /> : <Sparkles size={14} />}
-              {scriptBusy ? "Generating…" : "New script"}
-            </button>
           </div>
           {scriptError && <p style={{ ...styles.resultSub, margin: "8px 0 0", color: "#b03d2e" }}>{scriptError}</p>}
         </div>
@@ -1622,21 +1685,25 @@ const styles = {
   regenBox: { marginTop: 28, paddingTop: 20, borderTop: `1px solid ${line}` },
   regenLabel: { fontSize: 12.5, fontWeight: 700, color: muted, letterSpacing: 0.3, marginBottom: 10 },
   regenRow: { display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center" },
-  segmentGroup: { display: "flex", border: `1px solid ${line}`, borderRadius: 10, overflow: "hidden" },
+  segmentGroup: { display: "flex", flexWrap: "wrap", border: `1px solid ${line}`, borderRadius: 10, overflow: "hidden" },
   segmentBtn: {
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
     background: "#fff",
     border: "none",
     color: muted,
-    padding: "8px 14px",
+    padding: "9px 14px",
     fontSize: 13,
     fontWeight: 600,
     cursor: "pointer",
     fontFamily: "inherit",
   },
   segmentBtnActive: { background: moss, color: "#fff" },
+  focusForm: { display: "flex", flex: "1 1 220px", gap: 8, alignItems: "center" },
   regenFocusInput: {
-    flex: "1 1 200px",
-    minWidth: 160,
+    flex: "1 1 160px",
+    minWidth: 120,
     border: `1px solid ${line}`,
     borderRadius: 10,
     padding: "8px 12px",
@@ -1644,6 +1711,19 @@ const styles = {
     fontFamily: "inherit",
     outline: "none",
     background: paper,
+  },
+  focusGoBtn: {
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    width: 36,
+    height: 36,
+    flexShrink: 0,
+    background: moss,
+    color: "#fff",
+    border: "none",
+    borderRadius: 10,
+    cursor: "pointer",
   },
   qBlock: { marginBottom: 24 },
   qText: { fontSize: 15.5, fontWeight: 500, lineHeight: 1.5, margin: "0 0 12px", display: "flex", gap: 10 },
