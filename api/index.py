@@ -5,6 +5,7 @@ import io
 import json
 import os
 import re
+import struct
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -47,6 +48,21 @@ ELEVENLABS_MODEL = os.getenv("ELEVENLABS_MODEL", "eleven_multilingual_v2")
 ELEVENLABS_VOICE_HOST_A = os.getenv("ELEVENLABS_VOICE_HOST_A")
 ELEVENLABS_VOICE_HOST_B = os.getenv("ELEVENLABS_VOICE_HOST_B")
 ELEVENLABS_TIMEOUT_SECONDS = 55.0
+# Which text-to-speech backend the podcast audio uses. Gemini TTS is far
+# cheaper than ElevenLabs, so it's the default; set TTS_PROVIDER=elevenlabs
+# to switch back (the ElevenLabs code path is kept intact, just not used
+# unless selected). Gemini TTS reuses GEMINI_API_KEY.
+TTS_PROVIDER = os.getenv("TTS_PROVIDER", "gemini").strip().lower()
+GEMINI_TTS_MODEL = os.getenv("GEMINI_TTS_MODEL", "gemini-2.5-flash-preview-tts")
+# Two prebuilt Gemini voices for the two hosts. Full list in Gemini's TTS
+# docs (Kore, Puck, Charon, Fenrir, Aoede, Leda, Orus, Zephyr, …).
+GEMINI_TTS_VOICE_A = os.getenv("GEMINI_TTS_VOICE_A", "Kore")
+GEMINI_TTS_VOICE_B = os.getenv("GEMINI_TTS_VOICE_B", "Puck")
+# Firestore caps a document at 1 MiB. ElevenLabs MP3 segments fit easily;
+# Gemini TTS returns uncompressed PCM (wrapped as WAV) which can exceed that
+# for a long line, so a segment above this raw-bytes threshold is served but
+# not cached (base64 inflates ~4/3, leaving headroom under the 1 MiB cap).
+MAX_CACHED_AUDIO_BYTES = 740_000
 MAX_SEGMENT_TEXT_CHARS = 1_000
 # Bound the persisted tutor transcript so it can't grow past Firestore's
 # 1 MiB document cap: keep the most recent messages, each text truncated.
@@ -408,26 +424,36 @@ def _audio_segment_ref(db, uid: str, doc_id: str, segment_index: int):
     )
 
 
-def get_cached_segment_audio(uid: str, doc_id: str, segment_index: int) -> bytes | None:
+def get_cached_segment_audio(uid: str, doc_id: str, segment_index: int) -> tuple[bytes, str] | None:
     db = get_firestore_client()
     if db is None:
         return None
     snapshot = _audio_segment_ref(db, uid, doc_id, segment_index).get()
     if not snapshot.exists:
         return None
-    encoded = (snapshot.to_dict() or {}).get("data")
-    return base64.b64decode(encoded) if encoded else None
+    data = snapshot.to_dict() or {}
+    encoded = data.get("data")
+    if not encoded:
+        return None
+    # Older cached segments predate the stored mime field; they were all
+    # ElevenLabs MP3s, so default to audio/mpeg.
+    return base64.b64decode(encoded), data.get("mime", "audio/mpeg")
 
 
-def save_segment_audio(uid: str, doc_id: str, segment_index: int, audio_bytes: bytes) -> None:
+def save_segment_audio(uid: str, doc_id: str, segment_index: int, audio_bytes: bytes, mime: str) -> None:
     db = get_firestore_client()
     if db is None:
+        return
+    # Uncompressed Gemini WAV can exceed Firestore's 1 MiB document cap for a
+    # long line; skip caching those (they're still served, just regenerated
+    # next time) rather than failing the write.
+    if len(audio_bytes) > MAX_CACHED_AUDIO_BYTES:
         return
     # A separate document per segment (rather than a field on the parent
     # document) keeps each one well under Firestore's 1 MiB cap regardless
     # of how large the stored extracted text on the parent already is.
     _audio_segment_ref(db, uid, doc_id, segment_index).set(
-        {"data": base64.b64encode(audio_bytes).decode("ascii")}
+        {"data": base64.b64encode(audio_bytes).decode("ascii"), "mime": mime}
     )
 
 
@@ -946,6 +972,8 @@ def health() -> dict[str, Any]:
         "service": APP_NAME,
         "gemini_model": GEMINI_MODEL,
         "gemini_key_configured": bool(get_gemini_api_key()),
+        "tts_provider": TTS_PROVIDER,
+        "gemini_tts_model": GEMINI_TTS_MODEL,
         "elevenlabs_model": ELEVENLABS_MODEL,
         "elevenlabs_key_configured": bool(get_elevenlabs_api_key()),
         "firebase_configured": firebase_configured(),
@@ -1374,36 +1402,38 @@ async def podcast_audio_status(
     return AudioStatusResponse(cached_segments=list_cached_segment_indices(user.uid, doc_id))
 
 
-@app.post("/api/podcast/segment-audio")
-async def podcast_segment_audio(
-    request: SegmentAudioRequest, user: AuthedUser = Depends(require_user)
-) -> Response:
-    has_cache_key = request.document_id and request.segment_index is not None
-    if has_cache_key:
-        cached = get_cached_segment_audio(user.uid, request.document_id, request.segment_index)
-        if cached:
-            return Response(content=cached, media_type="audio/mpeg")
+def pcm_to_wav(pcm: bytes, sample_rate: int, channels: int = 1, bits: int = 16) -> bytes:
+    # Gemini TTS returns raw signed 16-bit little-endian PCM; browsers won't
+    # play that without a container, so wrap it in a minimal WAV header.
+    byte_rate = sample_rate * channels * bits // 8
+    block_align = channels * bits // 8
+    header = (
+        b"RIFF"
+        + struct.pack("<I", 36 + len(pcm))
+        + b"WAVE"
+        + b"fmt "
+        + struct.pack("<IHHIIHH", 16, 1, channels, sample_rate, byte_rate, block_align, bits)
+        + b"data"
+        + struct.pack("<I", len(pcm))
+    )
+    return header + pcm
 
-    check_usage_limit(user.uid)
 
+async def elevenlabs_tts(text: str, speaker: int) -> tuple[bytes, str]:
+    """Generate one segment via ElevenLabs. Returns (mp3_bytes, mime)."""
     api_key = get_elevenlabs_api_key()
     if not api_key:
         raise HTTPException(
             status_code=503,
             detail=(
                 "ElevenLabs API key is not configured. Add ELEVENLABS_API_KEY in your Vercel project settings "
-                "(Settings → Environment Variables) and redeploy, or set it in a local .env file."
+                "(Settings → Environment Variables) and redeploy, or set it in a local .env file, or set "
+                "TTS_PROVIDER=gemini to use Gemini TTS instead."
             ),
         )
 
-    text = request.text.strip()
-    if not text:
-        raise HTTPException(status_code=400, detail="Segment text must not be empty.")
-    if len(text) > MAX_SEGMENT_TEXT_CHARS:
-        raise HTTPException(status_code=400, detail="Segment text is too long for audio generation.")
-
     voice_a, voice_b = await resolve_voice_ids(api_key)
-    voice_id = voice_a if request.speaker == 0 else voice_b
+    voice_id = voice_a if speaker == 0 else voice_b
     url = f"{ELEVENLABS_API_BASE}/text-to-speech/{voice_id}"
 
     async with httpx.AsyncClient(timeout=ELEVENLABS_TIMEOUT_SECONDS) as client:
@@ -1429,9 +1459,87 @@ async def podcast_segment_audio(
             message = response.text[:300]
         raise HTTPException(status_code=502, detail=f"ElevenLabs API error ({response.status_code}): {message}")
 
-    audio_bytes = response.content
+    return response.content, "audio/mpeg"
+
+
+async def gemini_tts(text: str, speaker: int) -> tuple[bytes, str]:
+    """Generate one segment via Gemini TTS. Returns (wav_bytes, mime)."""
+    api_key = get_gemini_api_key()
+    if not api_key:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Gemini API key is not configured. Add GEMINI_API_KEY in your Vercel project settings "
+                "(Settings → Environment Variables) and redeploy, or set it in a local .env file."
+            ),
+        )
+
+    voice = GEMINI_TTS_VOICE_A if speaker == 0 else GEMINI_TTS_VOICE_B
+    url = f"{GEMINI_API_BASE}/models/{GEMINI_TTS_MODEL}:generateContent"
+    body = {
+        "contents": [{"parts": [{"text": text}]}],
+        "generationConfig": {
+            "responseModalities": ["AUDIO"],
+            "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": voice}}},
+        },
+    }
+
+    async with httpx.AsyncClient(timeout=GEMINI_TIMEOUT_SECONDS) as client:
+        try:
+            response = await client.post(url, headers={"x-goog-api-key": api_key}, json=body)
+        except httpx.HTTPError as exc:
+            raise HTTPException(status_code=502, detail=f"Could not reach the Gemini API: {exc}") from exc
+
+    if response.status_code != 200:
+        try:
+            message = response.json()["error"]["message"]
+        except Exception:
+            message = response.text[:500]
+        raise HTTPException(status_code=502, detail=f"Gemini TTS error ({response.status_code}): {message}")
+
+    data = response.json()
+    try:
+        part = data["candidates"][0]["content"]["parts"][0]
+        inline = part.get("inlineData") or part.get("inline_data")
+        pcm = base64.b64decode(inline["data"])
+        mime = inline.get("mimeType") or inline.get("mime_type") or ""
+    except (KeyError, IndexError, TypeError):
+        raise HTTPException(status_code=502, detail="Gemini TTS returned an unexpected response shape.")
+
+    # mimeType looks like "audio/L16;codec=pcm;rate=24000" — pull the rate.
+    match = re.search(r"rate=(\d+)", mime)
+    sample_rate = int(match.group(1)) if match else 24000
+    return pcm_to_wav(pcm, sample_rate), "audio/wav"
+
+
+@app.post("/api/podcast/segment-audio")
+async def podcast_segment_audio(
+    request: SegmentAudioRequest, user: AuthedUser = Depends(require_user)
+) -> Response:
+    has_cache_key = request.document_id and request.segment_index is not None
     if has_cache_key:
-        save_segment_audio(user.uid, request.document_id, request.segment_index, audio_bytes)
+        cached = get_cached_segment_audio(user.uid, request.document_id, request.segment_index)
+        if cached:
+            audio_bytes, mime = cached
+            return Response(content=audio_bytes, media_type=mime)
+
+    check_usage_limit(user.uid)
+
+    text = request.text.strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Segment text must not be empty.")
+    if len(text) > MAX_SEGMENT_TEXT_CHARS:
+        raise HTTPException(status_code=400, detail="Segment text is too long for audio generation.")
+
+    # Gemini TTS is the cheaper default; ElevenLabs stays available via
+    # TTS_PROVIDER=elevenlabs.
+    if TTS_PROVIDER == "elevenlabs":
+        audio_bytes, mime = await elevenlabs_tts(text, request.speaker)
+    else:
+        audio_bytes, mime = await gemini_tts(text, request.speaker)
+
+    if has_cache_key:
+        save_segment_audio(user.uid, request.document_id, request.segment_index, audio_bytes, mime)
 
     increment_usage(user.uid)
-    return Response(content=audio_bytes, media_type="audio/mpeg")
+    return Response(content=audio_bytes, media_type=mime)
