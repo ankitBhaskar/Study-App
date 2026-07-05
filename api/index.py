@@ -12,7 +12,7 @@ from typing import Any
 import firebase_admin
 import httpx
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, File, Header, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from firebase_admin import auth as firebase_auth
@@ -202,6 +202,23 @@ class QuizAttemptListResponse(BaseModel):
 
 class QuizRegenerateResponse(BaseModel):
     quiz: list[QuizQuestion]
+
+
+class SummaryRegenerateRequest(BaseModel):
+    length: str = "concise"
+    focus: str = ""
+
+
+class SummaryRegenerateResponse(BaseModel):
+    summary: list[str]
+
+
+class PodcastRegenerateRequest(BaseModel):
+    style: str = "conversation"
+
+
+class PodcastRegenerateResponse(BaseModel):
+    podcast: Podcast
 
 
 class SegmentAudioRequest(BaseModel):
@@ -708,33 +725,104 @@ def parse_json_text(text: str) -> dict[str, Any]:
     return parsed
 
 
-STUDY_SYSTEM_INSTRUCTION = """You are an expert study assistant. Use ONLY the uploaded document content provided by the user.
+PODCAST_STYLES = {"conversation", "solo", "interview"}
+SUMMARY_LENGTHS = {"concise", "detailed"}
+
+# Shared between the combined study-analysis prompt and the standalone
+# regenerate-only prompts, so "New script" / a different length always reads
+# consistently with what the first generation would have produced.
+PODCAST_STYLE_GUIDANCE = {
+    "conversation": (
+        'Format: a natural two-host conversation. Invent two host names (e.g. "Maya" and "Theo") who '
+        "banter naturally, ask each other questions, and build on what the other just said. Alternate "
+        "speakers frequently so both hosts get airtime."
+    ),
+    "solo": (
+        "Format: a single narrator speaking alone, like a solo explainer podcast. Invent one host name "
+        'and use that same name as "speaker" for every segment. Write it as a flowing monologue that '
+        "still sounds spoken, not read aloud — use rhetorical questions and asides to keep it engaging."
+    ),
+    "interview": (
+        'Format: an interview. Invent two names: a "Host" who asks probing questions and a "Guest" '
+        "presented as an expert on the material who answers in more depth. Have the Host ask short "
+        "follow-up questions after the Guest's answers."
+    ),
+}
+
+SUMMARY_LENGTH_GUIDANCE = {
+    "concise": "Write 4 to 6 concise key-point strings covering the document.",
+    "detailed": (
+        "Write 8 to 12 detailed key-point strings covering the document, going deeper into mechanisms, "
+        "numbers and examples than a brief overview would."
+    ),
+}
+
+
+def _summary_instruction_line(length: str, focus: str) -> str:
+    line = SUMMARY_LENGTH_GUIDANCE.get(length, SUMMARY_LENGTH_GUIDANCE["concise"])
+    focus = focus.strip()
+    if focus:
+        line += (
+            f' Focus specifically on this topic from the document: "{focus}" — '
+            "skip parts of the document unrelated to it."
+        )
+    return line
+
+
+def build_study_system_instruction(podcast_style: str, summary_length: str, summary_focus: str) -> str:
+    summary_line = _summary_instruction_line(summary_length, summary_focus)
+    podcast_line = PODCAST_STYLE_GUIDANCE.get(podcast_style, PODCAST_STYLE_GUIDANCE["conversation"])
+    return f"""You are an expert study assistant. Use ONLY the uploaded document content provided by the user.
 Create study material and return a single JSON object with EXACTLY this shape (no markdown, no extra keys):
-{
+{{
   "title": "short document title, e.g. chapter name",
-  "summary": ["4 to 6 key-point strings covering the document"],
-  "quiz": {
+  "summary": ["key-point strings covering the document"],
+  "quiz": {{
     "questions": [
-      {
+      {{
         "question": "string",
         "options": ["exactly 4 answer options"],
         "correctOptionIndex": 0,
         "explanation": "why the answer is correct",
         "topic": "short topic label"
-      }
+      }}
     ]
-  },
-  "podcastScript": {
-    "title": "episode title",
+  }},
+  "podcastScript": {{
     "durationMinutes": 10,
-    "hosts": ["Maya", "Theo"],
+    "hosts": ["name", ...],
     "segments": [
-      {"timestamp": "0:00", "speaker": "Maya", "line": "spoken line"}
+      {{"timestamp": "0:00", "speaker": "name", "line": "spoken line"}}
     ]
-  }
-}
-Create 3 to 5 quiz questions. Create 8 to 12 podcast segments as a natural two-host conversation walking through the document,
-with timestamps spread between 0:00 and 9:30 in mm:ss format. Everything must be grounded in the document content."""
+  }}
+}}
+Summary instructions: {summary_line}
+Podcast instructions: {podcast_line} Create 8 to 12 podcast segments with timestamps spread between 0:00 and 9:30 in mm:ss format.
+Create 3 to 5 quiz questions. Everything must be grounded in the document content."""
+
+
+def build_summary_system_instruction(length: str, focus: str) -> str:
+    summary_line = _summary_instruction_line(length, focus)
+    return f"""You are an expert study assistant. Use ONLY the uploaded document content provided by the user.
+Generate a fresh summary of the document. Return a single JSON object with EXACTLY this shape (no markdown, no extra keys):
+{{
+  "summary": ["key-point strings covering the document"]
+}}
+{summary_line} Everything must be grounded in the document content."""
+
+
+def build_podcast_system_instruction(style: str) -> str:
+    podcast_line = PODCAST_STYLE_GUIDANCE.get(style, PODCAST_STYLE_GUIDANCE["conversation"])
+    return f"""You are an expert study assistant. Use ONLY the uploaded document content provided by the user.
+Generate a fresh podcast script grounded in the document. Return a single JSON object with EXACTLY this shape (no markdown, no extra keys):
+{{
+  "durationMinutes": 10,
+  "hosts": ["name", ...],
+  "segments": [
+    {{"timestamp": "0:00", "speaker": "name", "line": "spoken line"}}
+  ]
+}}
+{podcast_line} Create 8 to 12 segments with timestamps spread between 0:00 and 9:30 in mm:ss format. Everything must be grounded in the document content."""
 
 
 QUIZ_SYSTEM_INSTRUCTION = """You are an expert study assistant. Use ONLY the uploaded document content provided by the user.
@@ -780,21 +868,13 @@ def parse_quiz_questions(quiz_raw: Any) -> list[QuizQuestion]:
     return quiz
 
 
-def normalise_study_content(raw: dict[str, Any], file_name: str) -> tuple[str, list[str], list[QuizQuestion], Podcast]:
-    title = str(raw.get("title") or file_name)
-
-    summary_raw = raw.get("summary")
+def parse_summary_points(summary_raw: Any) -> list[str]:
     if isinstance(summary_raw, dict):
         summary_raw = summary_raw.get("detailedSummary") or [summary_raw.get("shortSummary", "")]
-    summary = [str(point) for point in summary_raw or [] if str(point).strip()]
-    if not summary:
-        raise HTTPException(status_code=502, detail="Gemini response did not include a usable summary.")
+    return [str(point) for point in summary_raw or [] if str(point).strip()]
 
-    quiz = parse_quiz_questions(raw.get("quiz") or {})
-    if not quiz:
-        raise HTTPException(status_code=502, detail="Gemini response did not include usable quiz questions.")
 
-    podcast_raw = raw.get("podcastScript") or {}
+def parse_podcast_script(podcast_raw: dict[str, Any]) -> Podcast | None:
     hosts = [str(host) for host in podcast_raw.get("hosts") or []] or ["Maya", "Theo"]
     segments: list[PodcastSegment] = []
     for seg in podcast_raw.get("segments") or []:
@@ -808,13 +888,32 @@ def normalise_study_content(raw: dict[str, Any], file_name: str) -> tuple[str, l
             timestamp = "0:00"
         segments.append(PodcastSegment(t=timestamp, who=str(seg.get("speaker") or seg.get("who") or hosts[0]), line=line))
     if not segments:
-        raise HTTPException(status_code=502, detail="Gemini response did not include a usable podcast script.")
+        return None
 
     try:
         duration_minutes = int(podcast_raw.get("durationMinutes") or 10)
     except (TypeError, ValueError):
         duration_minutes = 10
-    podcast = Podcast(duration=f"{duration_minutes}:00", hosts=hosts[:2], transcript=segments)
+    # A solo-narrator script only has one host; conversation/interview have
+    # two. Cap at 2 either way since that's all the ElevenLabs voice pipeline
+    # (§ segment-audio) resolves.
+    return Podcast(duration=f"{duration_minutes}:00", hosts=hosts[:2], transcript=segments)
+
+
+def normalise_study_content(raw: dict[str, Any], file_name: str) -> tuple[str, list[str], list[QuizQuestion], Podcast]:
+    title = str(raw.get("title") or file_name)
+
+    summary = parse_summary_points(raw.get("summary"))
+    if not summary:
+        raise HTTPException(status_code=502, detail="Gemini response did not include a usable summary.")
+
+    quiz = parse_quiz_questions(raw.get("quiz") or {})
+    if not quiz:
+        raise HTTPException(status_code=502, detail="Gemini response did not include usable quiz questions.")
+
+    podcast = parse_podcast_script(raw.get("podcastScript") or {})
+    if podcast is None:
+        raise HTTPException(status_code=502, detail="Gemini response did not include a usable podcast script.")
 
     return title, summary, quiz, podcast
 
@@ -977,12 +1076,23 @@ async def prepare_pdf(file: UploadFile = File(...)) -> PdfProcessingResponse:
 
 
 @app.post("/api/pdf/analyze", response_model=StudyAnalysisResponse)
-async def analyze_pdf(file: UploadFile = File(...), user: AuthedUser = Depends(require_user)) -> StudyAnalysisResponse:
+async def analyze_pdf(
+    file: UploadFile = File(...),
+    # Optional generation options — same choices exposed as "New questions" /
+    # "New script" regeneration after the fact, but selectable up front too.
+    podcast_style: str = Form("conversation"),
+    summary_length: str = Form("concise"),
+    summary_focus: str = Form(""),
+    user: AuthedUser = Depends(require_user),
+) -> StudyAnalysisResponse:
     check_usage_limit(user.uid)
 
     extracted = await read_pdf_upload(file)
     file_name = file.filename or "uploaded-document.pdf"
     context = extracted.text[:MAX_GEMINI_CONTEXT_CHARS]
+    podcast_style = podcast_style if podcast_style in PODCAST_STYLES else "conversation"
+    summary_length = summary_length if summary_length in SUMMARY_LENGTHS else "concise"
+    summary_focus = summary_focus.strip()[:200]
 
     contents = [
         {
@@ -999,7 +1109,8 @@ async def analyze_pdf(file: UploadFile = File(...), user: AuthedUser = Depends(r
         }
     ]
 
-    raw_text = await call_gemini(STUDY_SYSTEM_INSTRUCTION, contents, json_response=True)
+    system_instruction = build_study_system_instruction(podcast_style, summary_length, summary_focus)
+    raw_text = await call_gemini(system_instruction, contents, json_response=True)
     raw = parse_json_text(raw_text)
     title, summary, quiz, podcast = normalise_study_content(raw, file_name)
 
@@ -1120,18 +1231,8 @@ async def post_quiz_attempt(
 async def regenerate_quiz(doc_id: str, user: AuthedUser = Depends(require_user)) -> QuizRegenerateResponse:
     check_usage_limit(user.uid)
 
-    db = get_firestore_client()
-    doc_ref = db.collection("users").document(user.uid).collection("documents").document(doc_id)
-    snapshot = doc_ref.get()
-    if not snapshot.exists:
-        raise HTTPException(status_code=404, detail="Document not found.")
-    data = snapshot.to_dict() or {}
-    context = (data.get("document_context") or "").strip()[:MAX_GEMINI_CONTEXT_CHARS]
-    if not context:
-        raise HTTPException(
-            status_code=400,
-            detail="This document's text wasn't saved, so a new quiz can't be generated. Re-upload the PDF.",
-        )
+    doc_ref, data = _get_document_or_404(user.uid, doc_id)
+    context = _require_document_context(data, "quiz")
 
     # Ask Gemini to avoid repeating the current quiz and recent attempts, so
     # "new questions" is actually a different set rather than a reshuffle.
@@ -1167,6 +1268,100 @@ async def regenerate_quiz(doc_id: str, user: AuthedUser = Depends(require_user))
     doc_ref.update({"quiz": [q.model_dump() for q in quiz]})
     increment_usage(user.uid)
     return QuizRegenerateResponse(quiz=quiz)
+
+
+def _get_document_or_404(uid: str, doc_id: str):
+    db = get_firestore_client()
+    doc_ref = db.collection("users").document(uid).collection("documents").document(doc_id)
+    snapshot = doc_ref.get()
+    if not snapshot.exists:
+        raise HTTPException(status_code=404, detail="Document not found.")
+    return doc_ref, snapshot.to_dict() or {}
+
+
+def _require_document_context(data: dict[str, Any], what: str) -> str:
+    context = (data.get("document_context") or "").strip()[:MAX_GEMINI_CONTEXT_CHARS]
+    if not context:
+        raise HTTPException(
+            status_code=400,
+            detail=f"This document's text wasn't saved, so a new {what} can't be generated. Re-upload the PDF.",
+        )
+    return context
+
+
+@app.post("/api/documents/{doc_id}/summary/regenerate", response_model=SummaryRegenerateResponse)
+async def regenerate_summary(
+    doc_id: str, request: SummaryRegenerateRequest, user: AuthedUser = Depends(require_user)
+) -> SummaryRegenerateResponse:
+    check_usage_limit(user.uid)
+
+    doc_ref, data = _get_document_or_404(user.uid, doc_id)
+    context = _require_document_context(data, "summary")
+
+    length = request.length if request.length in SUMMARY_LENGTHS else "concise"
+    focus = request.focus.strip()[:200]
+    contents = [
+        {
+            "role": "user",
+            "parts": [
+                {
+                    "text": (
+                        f"File name: {data.get('file_name', 'uploaded-document.pdf')}\n\n"
+                        "Document content:\n\n"
+                        f"{context}"
+                    )
+                }
+            ],
+        }
+    ]
+    raw_text = await call_gemini(build_summary_system_instruction(length, focus), contents, json_response=True)
+    summary = parse_summary_points(parse_json_text(raw_text).get("summary"))
+    if not summary:
+        raise HTTPException(status_code=502, detail="Gemini response did not include a usable summary.")
+
+    doc_ref.update({"summary": summary})
+    increment_usage(user.uid)
+    return SummaryRegenerateResponse(summary=summary)
+
+
+@app.post("/api/documents/{doc_id}/podcast/regenerate", response_model=PodcastRegenerateResponse)
+async def regenerate_podcast(
+    doc_id: str, request: PodcastRegenerateRequest, user: AuthedUser = Depends(require_user)
+) -> PodcastRegenerateResponse:
+    check_usage_limit(user.uid)
+
+    doc_ref, data = _get_document_or_404(user.uid, doc_id)
+    context = _require_document_context(data, "podcast script")
+
+    style = request.style if request.style in PODCAST_STYLES else "conversation"
+    contents = [
+        {
+            "role": "user",
+            "parts": [
+                {
+                    "text": (
+                        f"File name: {data.get('file_name', 'uploaded-document.pdf')}\n\n"
+                        "Document content:\n\n"
+                        f"{context}"
+                    )
+                }
+            ],
+        }
+    ]
+    raw_text = await call_gemini(build_podcast_system_instruction(style), contents, json_response=True)
+    podcast = parse_podcast_script(parse_json_text(raw_text))
+    if podcast is None:
+        raise HTTPException(status_code=502, detail="Gemini response did not include a usable podcast script.")
+
+    # The new script's segments no longer line up with any cached audio
+    # (different text at the same indices), so drop the stale cache rather
+    # than risk mismatched audio playing over the new transcript.
+    for audio_doc in doc_ref.collection("audio").stream():
+        audio_doc.reference.delete()
+
+    doc_ref.update({"podcast": podcast.model_dump()})
+    increment_usage(user.uid)
+    return PodcastRegenerateResponse(podcast=podcast)
 
 
 @app.get("/api/podcast/audio-status/{doc_id}", response_model=AudioStatusResponse)

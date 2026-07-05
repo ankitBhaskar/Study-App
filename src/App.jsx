@@ -569,7 +569,7 @@ function StudyScreen({ tab, setTab, fileName, doc, authedFetch }) {
       </nav>
 
       <section className="panel" style={styles.panel}>
-        {tab === "summary" && <SummaryPanel doc={doc} />}
+        {tab === "summary" && <SummaryPanel doc={doc} documentId={doc.documentId} authedFetch={authedFetch} />}
         {tab === "quiz" && <QuizPanel doc={doc} documentId={doc.documentId} authedFetch={authedFetch} />}
         {tab === "podcast" && <PodcastPanel doc={doc} documentId={doc.documentId} authedFetch={authedFetch} />}
         {tab === "tutor" && (
@@ -586,18 +586,88 @@ function StudyScreen({ tab, setTab, fileName, doc, authedFetch }) {
   );
 }
 
-function SummaryPanel({ doc }) {
+const SUMMARY_LENGTHS = [
+  { id: "concise", label: "Concise" },
+  { id: "detailed", label: "Detailed" },
+];
+
+function SummaryPanel({ doc, documentId, authedFetch }) {
+  // Local copy so regenerating never overwrites doc.summary — matches the
+  // same pattern QuizPanel uses for its active question set.
+  const [summary, setSummary] = useState(doc.summary);
+  const [length, setLength] = useState("concise");
+  const [focus, setFocus] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    setSummary(doc.summary);
+    setError("");
+  }, [doc]);
+
+  const regenerate = async () => {
+    setBusy(true);
+    setError("");
+    try {
+      const res = await authedFetch(`/api/documents/${documentId}/summary/regenerate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ length, focus: focus.trim() }),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok) throw new Error(data?.detail || `Could not generate a new summary (error ${res.status}).`);
+      setSummary(data.summary);
+    } catch (err) {
+      setError(
+        err instanceof TypeError ? "Could not reach the study service. Please try again in a moment." : err.message
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <div className="fade">
       <h3 style={styles.panelH}>Key points</h3>
       <ul style={styles.summaryList}>
-        {doc.summary.map((point, i) => (
+        {summary.map((point, i) => (
           <li key={i} style={styles.summaryItem}>
             <span style={styles.summaryNum}>{String(i + 1).padStart(2, "0")}</span>
             <span><Markdown>{point}</Markdown></span>
           </li>
         ))}
       </ul>
+
+      {documentId && (
+        <div style={styles.regenBox}>
+          <p style={styles.regenLabel}>Regenerate with different options</p>
+          <div style={styles.regenRow}>
+            <div style={styles.segmentGroup}>
+              {SUMMARY_LENGTHS.map((opt) => (
+                <button
+                  key={opt.id}
+                  style={{ ...styles.segmentBtn, ...(length === opt.id ? styles.segmentBtnActive : {}) }}
+                  onClick={() => setLength(opt.id)}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+            <input
+              style={styles.regenFocusInput}
+              placeholder="Focus on a topic (optional)"
+              value={focus}
+              onChange={(e) => setFocus(e.target.value)}
+              maxLength={200}
+            />
+            <button style={{ ...styles.audioBtn, opacity: busy ? 0.6 : 1 }} onClick={regenerate} disabled={busy}>
+              {busy ? <span className="spinner" style={{ width: 14, height: 14, borderWidth: 2 }} /> : <Sparkles size={14} />}
+              {busy ? "Generating…" : "Regenerate summary"}
+            </button>
+          </div>
+          {error && <p style={{ ...styles.resultSub, margin: "8px 0 0", color: "#b03d2e" }}>{error}</p>}
+        </div>
+      )}
     </div>
   );
 }
@@ -788,8 +858,21 @@ function QuizPanel({ doc, documentId, authedFetch }) {
   );
 }
 
+const PODCAST_STYLES = [
+  { id: "conversation", label: "Two hosts" },
+  { id: "solo", label: "Solo narrator" },
+  { id: "interview", label: "Interview" },
+];
+
 function PodcastPanel({ doc, documentId, authedFetch }) {
-  const { duration, hosts, transcript } = doc.podcast;
+  // Local copy so regenerating the script never overwrites doc.podcast —
+  // same pattern QuizPanel/SummaryPanel use for their own active content.
+  const [podcast, setPodcast] = useState(doc.podcast);
+  const { duration, hosts, transcript } = podcast;
+
+  const [podcastStyle, setPodcastStyle] = useState("conversation");
+  const [scriptBusy, setScriptBusy] = useState(false);
+  const [scriptError, setScriptError] = useState("");
 
   // AI audio state: idle → generating → ready (or error). There is no
   // simulated/fake playback — the player only appears once real audio
@@ -806,9 +889,45 @@ function PodcastPanel({ doc, documentId, authedFetch }) {
   // ref rather than state — playback reads it without forcing re-renders.
   const urlsRef = useRef([]);
 
+  useEffect(() => {
+    setPodcast(doc.podcast);
+    setScriptError("");
+  }, [doc]);
+
   const revokeUrls = () => {
     urlsRef.current.forEach((u) => u && URL.revokeObjectURL(u));
     urlsRef.current = [];
+  };
+
+  const regenerateScript = async () => {
+    setScriptBusy(true);
+    setScriptError("");
+    try {
+      const res = await authedFetch(`/api/documents/${documentId}/podcast/regenerate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ style: podcastStyle }),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok) throw new Error(data?.detail || `Could not generate a new script (error ${res.status}).`);
+      // The new script no longer lines up with any previously generated
+      // audio (the backend already dropped that stale cache), so reset
+      // playback state along with swapping in the new transcript.
+      audioRef.current?.pause();
+      revokeUrls();
+      setPlaying(false);
+      setPlayingIdx(0);
+      setSegProgress(0);
+      setAudioError("");
+      setAudioState("idle");
+      setPodcast(data.podcast);
+    } catch (err) {
+      setScriptError(
+        err instanceof TypeError ? "Could not reach the study service. Please try again in a moment." : err.message
+      );
+    } finally {
+      setScriptBusy(false);
+    }
   };
 
   // On mount / when switching documents: reset the player, then ask the
@@ -974,6 +1093,30 @@ function PodcastPanel({ doc, documentId, authedFetch }) {
           <p style={styles.podHosts}>{hosts.join(" & ")} walk through the chapter</p>
         </div>
       </div>
+
+      {documentId && (
+        <div style={styles.regenBox}>
+          <p style={styles.regenLabel}>Regenerate the script in a different style</p>
+          <div style={styles.regenRow}>
+            <div style={styles.segmentGroup}>
+              {PODCAST_STYLES.map((opt) => (
+                <button
+                  key={opt.id}
+                  style={{ ...styles.segmentBtn, ...(podcastStyle === opt.id ? styles.segmentBtnActive : {}) }}
+                  onClick={() => setPodcastStyle(opt.id)}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+            <button style={{ ...styles.audioBtn, opacity: scriptBusy ? 0.6 : 1 }} onClick={regenerateScript} disabled={scriptBusy}>
+              {scriptBusy ? <span className="spinner" style={{ width: 14, height: 14, borderWidth: 2 }} /> : <Sparkles size={14} />}
+              {scriptBusy ? "Generating…" : "New script"}
+            </button>
+          </div>
+          {scriptError && <p style={{ ...styles.resultSub, margin: "8px 0 0", color: "#b03d2e" }}>{scriptError}</p>}
+        </div>
+      )}
 
       <div style={styles.audioBar}>
         {audioState === "idle" && (
@@ -1476,6 +1619,32 @@ const styles = {
   summaryList: { listStyle: "none", margin: 0, padding: 0, display: "grid", gap: 16 },
   summaryItem: { display: "flex", gap: 14, fontSize: 15, lineHeight: 1.6, alignItems: "flex-start" },
   summaryNum: { color: moss, fontWeight: 700, fontSize: 13, fontVariantNumeric: "tabular-nums", marginTop: 2 },
+  regenBox: { marginTop: 28, paddingTop: 20, borderTop: `1px solid ${line}` },
+  regenLabel: { fontSize: 12.5, fontWeight: 700, color: muted, letterSpacing: 0.3, marginBottom: 10 },
+  regenRow: { display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center" },
+  segmentGroup: { display: "flex", border: `1px solid ${line}`, borderRadius: 10, overflow: "hidden" },
+  segmentBtn: {
+    background: "#fff",
+    border: "none",
+    color: muted,
+    padding: "8px 14px",
+    fontSize: 13,
+    fontWeight: 600,
+    cursor: "pointer",
+    fontFamily: "inherit",
+  },
+  segmentBtnActive: { background: moss, color: "#fff" },
+  regenFocusInput: {
+    flex: "1 1 200px",
+    minWidth: 160,
+    border: `1px solid ${line}`,
+    borderRadius: 10,
+    padding: "8px 12px",
+    fontSize: 13.5,
+    fontFamily: "inherit",
+    outline: "none",
+    background: paper,
+  },
   qBlock: { marginBottom: 24 },
   qText: { fontSize: 15.5, fontWeight: 500, lineHeight: 1.5, margin: "0 0 12px", display: "flex", gap: 10 },
   qIndex: { color: amber, fontWeight: 700, fontSize: 13, marginTop: 2 },

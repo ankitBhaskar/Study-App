@@ -11,7 +11,8 @@ A React/Vite study app that turns an uploaded PDF into a study workflow: Gemini-
 - Responsive document upload screen with drag-and-drop interaction
 - Real PDF upload → Gemini analysis producing summary, quiz and podcast script
 - Interactive quiz with scoring and weak-topic feedback; generate a fresh, non-repeating set of questions on demand, and every attempt is saved so past scores and answers can be reviewed later
-- Podcast player with generated transcript
+- Summary can be regenerated with a different length (concise/detailed) or focused on a specific topic in the document
+- Podcast player with generated transcript; regenerate the script in a different style (two-host conversation, solo narrator, or interview) at any time
 - AI podcast audio: two distinct ElevenLabs voices read the generated script; once generated for a document, audio is cached in Firestore and reused free on later visits instead of calling ElevenLabs again
 - Chat and summary text render markdown (bold, lists, etc.) instead of showing raw asterisks
 - Tutor chat answering questions scoped to the uploaded PDF via Gemini
@@ -100,15 +101,23 @@ Then run the backend with `FIREBASE_PROJECT_ID=demo-study-app FIRESTORE_EMULATOR
 
 ## API endpoints
 
-- `POST /api/pdf/analyze` — upload a PDF, get Gemini-generated study content (title, summary, quiz, podcast script) plus the extracted `document_context` used for tutor chat, and save the derived data to the signed-in user's Firestore history. Requires sign-in and `GEMINI_API_KEY`; counts against the daily usage limit.
+- `POST /api/pdf/analyze` — upload a PDF, get Gemini-generated study content (title, summary, quiz, podcast script) plus the extracted `document_context` used for tutor chat, and save the derived data to the signed-in user's Firestore history. Optional form fields choose the initial generation style: `podcast_style` (`conversation` default / `solo` / `interview`), `summary_length` (`concise` default / `detailed`), `summary_focus` (free text, optional). Requires sign-in and `GEMINI_API_KEY`; counts against the daily usage limit.
 - `POST /api/chat` — ask the tutor a question scoped to the uploaded document (`{document_context, file_name, question, history}`). Requires sign-in and `GEMINI_API_KEY`; counts against the daily usage limit.
+- `GET`/`PUT /api/documents/{id}/chat` — read or save the tutor chat transcript for a document, so it's restored on the next visit. Storage only, no usage-limit cost.
+- `GET /api/documents/{id}/quiz/attempts` / `POST /api/documents/{id}/quiz/attempts` — list past quiz attempts (score, questions, answers; newest first, capped at 20) or record a new one. Score is computed server-side. Storage only, no usage-limit cost.
+- `POST /api/documents/{id}/quiz/regenerate` — generate a new set of quiz questions from the document's saved text, explicitly avoiding the current quiz and recent attempts. Overwrites the document's stored quiz. Requires `GEMINI_API_KEY`; counts against the daily usage limit.
+- `POST /api/documents/{id}/summary/regenerate` — regenerate the summary with a chosen `{length: "concise"|"detailed", focus}`. Overwrites the document's stored summary. Requires `GEMINI_API_KEY`; counts against the daily usage limit.
+- `POST /api/documents/{id}/podcast/regenerate` — regenerate the podcast script in a chosen `{style: "conversation"|"solo"|"interview"}`. Overwrites the stored script and clears any cached audio for the document (it no longer matches). Requires `GEMINI_API_KEY`; counts against the daily usage limit.
 - `POST /api/podcast/segment-audio` — turn one transcript segment into speech (`{text, speaker, document_id, segment_index}`; the last two are optional but enable caching); returns MP3 audio. Requires sign-in and `ELEVENLABS_API_KEY`; counts against the daily usage limit only on a cache miss. The frontend calls this once per segment and plays them back-to-back, keeping each response well under Vercel's size limits. When `document_id`/`segment_index` are given, generated audio is stored (base64, one Firestore document per segment) and reused on future requests for that exact segment — free and instant, no new ElevenLabs call or usage-limit hit.
+- `GET /api/podcast/audio-status/{id}` — which segment indices already have cached audio for a document, so the player can restore itself after a reload without regenerating.
 - `GET /api/profile` — the signed-in user's email, account creation date, and today's usage vs. the daily limit.
 - `GET /api/documents` — the signed-in user's document history (up to 50, newest first; metadata and study data only).
 - `GET /api/documents/{id}` — one history document including its stored extracted text, used to re-enable Tutor chat when reopening.
-- `DELETE /api/documents/{id}` / `DELETE /api/documents` — delete one document or clear all history.
+- `DELETE /api/documents/{id}` / `DELETE /api/documents` — delete one document or clear all history, including its cached audio, chat log and quiz attempts.
 - `POST /api/pdf/prepare` — extract, clean and chunk PDF text and return a Gemini-ready payload without calling Gemini. No sign-in needed.
 - `GET /api/health` — reports service status and whether Gemini, ElevenLabs and Firebase are configured, plus whether `ALLOWED_EMAILS` is restricting access.
+
+See [API_INTEGRATIONS.md](API_INTEGRATIONS.md) for exact prompts, file/line references, and request/response shapes for every endpoint above.
 
 All endpoints except `/api/pdf/prepare` and `/api/health` require an `Authorization: Bearer <Firebase ID token>` header.
 
