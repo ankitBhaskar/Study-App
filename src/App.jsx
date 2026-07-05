@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from "react";
 import {
   ArrowRight,
   BookOpen,
+  Check,
   Clock,
   FileText,
   Headphones,
@@ -586,6 +587,47 @@ function StudyScreen({ tab, setTab, fileName, doc, authedFetch }) {
   );
 }
 
+// Shared "regenerate in a different way" control, used by Summary and
+// Podcast so both tabs read identically: a labelled row of tappable action
+// buttons (not a toggle) where one tap starts generation, the tapped button
+// shows a spinner, and the option currently applied is marked "current".
+function RegenActions({ heading, options, activeId, busyId, disabled, onPick }) {
+  return (
+    <div style={styles.regenSection}>
+      <p style={styles.regenHeading}>{heading}</p>
+      <div style={styles.regenActions}>
+        {options.map((opt) => {
+          const isBusy = busyId === opt.id;
+          const isCurrent = activeId === opt.id;
+          return (
+            <button
+              key={opt.id}
+              style={{
+                ...styles.regenActionBtn,
+                ...(isCurrent ? styles.regenActionBtnCurrent : {}),
+                opacity: disabled && !isBusy ? 0.5 : 1,
+                cursor: disabled ? "default" : "pointer",
+              }}
+              onClick={() => onPick(opt.id)}
+              disabled={disabled}
+            >
+              {isBusy ? (
+                <span className="spinner" style={{ width: 13, height: 13, borderWidth: 2 }} />
+              ) : isCurrent ? (
+                <Check size={14} strokeWidth={2.6} />
+              ) : (
+                <Sparkles size={14} />
+              )}
+              {isBusy ? "Generating…" : opt.label}
+              {isCurrent && !isBusy && <span style={styles.regenCurrentTag}>current</span>}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 const SUMMARY_LENGTHS = [
   { id: "concise", label: "Concise" },
   { id: "detailed", label: "Detailed" },
@@ -607,10 +649,11 @@ function SummaryPanel({ doc, documentId, authedFetch }) {
     setError("");
   }, [doc]);
 
-  // One tap = generate. Tapping a length chip regenerates right away with
-  // that length (keeping any focus text); submitting the focus field
-  // regenerates with the current length.
-  const regenerate = async (nextLength, busyKey) => {
+  // One tap = generate. `busyKey` marks which control shows the spinner
+  // ("concise" / "detailed" for the length buttons, "focus" for the topic
+  // field). Length buttons summarise the whole document; the focus field
+  // summarises just the typed topic — the two actions never overlap.
+  const regenerate = async (nextLength, focusText, busyKey) => {
     if (busyWith) return;
     setBusyWith(busyKey);
     setError("");
@@ -618,7 +661,7 @@ function SummaryPanel({ doc, documentId, authedFetch }) {
       const res = await authedFetch(`/api/documents/${documentId}/summary/regenerate`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ length: nextLength, focus: focus.trim() }),
+        body: JSON.stringify({ length: nextLength, focus: focusText }),
       });
       const data = await res.json().catch(() => null);
       if (!res.ok) throw new Error(data?.detail || `Could not generate a new summary (error ${res.status}).`);
@@ -647,43 +690,28 @@ function SummaryPanel({ doc, documentId, authedFetch }) {
 
       {documentId && (
         <div style={styles.regenBox}>
-          <p style={styles.regenLabel}>Tap a style to generate a new summary</p>
-          <div style={styles.regenRow}>
-            <div style={styles.segmentGroup}>
-              {SUMMARY_LENGTHS.map((opt) => {
-                const isBusy = busyWith === opt.id;
-                return (
-                  <button
-                    key={opt.id}
-                    style={{
-                      ...styles.segmentBtn,
-                      ...(length === opt.id ? styles.segmentBtnActive : {}),
-                      opacity: busyWith && !isBusy ? 0.5 : 1,
-                    }}
-                    onClick={() => regenerate(opt.id, opt.id)}
-                    disabled={!!busyWith}
-                  >
-                    {isBusy && (
-                      <span
-                        className="spinner"
-                        style={{ width: 12, height: 12, borderWidth: 2, marginRight: 6, ...(length === opt.id ? { borderColor: "rgba(255,255,255,0.4)", borderTopColor: "#fff" } : {}) }}
-                      />
-                    )}
-                    {isBusy ? "Generating…" : opt.label}
-                  </button>
-                );
-              })}
-            </div>
+          <RegenActions
+            heading="Regenerate summary"
+            options={SUMMARY_LENGTHS}
+            activeId={length}
+            busyId={busyWith}
+            disabled={!!busyWith}
+            // Length buttons cover the whole document (no focus topic).
+            onPick={(id) => regenerate(id, "", id)}
+          />
+
+          <div style={styles.focusBlock}>
+            <p style={styles.focusLabel}>Or focus on one topic</p>
             <form
-              style={styles.focusForm}
+              style={styles.focusInputRow}
               onSubmit={(e) => {
                 e.preventDefault();
-                regenerate(length, "focus");
+                if (focus.trim()) regenerate(length, focus.trim(), "focus");
               }}
             >
               <input
-                style={styles.regenFocusInput}
-                placeholder="Focus on a topic…"
+                style={styles.focusInput}
+                placeholder="e.g. maturity benefits, Option 2"
                 value={focus}
                 onChange={(e) => setFocus(e.target.value)}
                 maxLength={200}
@@ -691,19 +719,19 @@ function SummaryPanel({ doc, documentId, authedFetch }) {
               />
               <button
                 type="submit"
-                style={{ ...styles.focusGoBtn, opacity: busyWith || !focus.trim() ? 0.5 : 1 }}
+                style={{ ...styles.focusGenBtn, opacity: busyWith || !focus.trim() ? 0.5 : 1, cursor: busyWith || !focus.trim() ? "default" : "pointer" }}
                 disabled={!!busyWith || !focus.trim()}
-                aria-label="Generate summary focused on this topic"
               >
                 {busyWith === "focus" ? (
                   <span className="spinner" style={{ width: 14, height: 14, borderWidth: 2 }} />
                 ) : (
                   <Sparkles size={15} />
                 )}
+                Generate
               </button>
             </form>
           </div>
-          {error && <p style={{ ...styles.resultSub, margin: "8px 0 0", color: "#b03d2e" }}>{error}</p>}
+          {error && <p style={{ ...styles.resultSub, margin: "12px 0 0", color: "#b03d2e" }}>{error}</p>}
         </div>
       )}
     </div>
@@ -1149,35 +1177,18 @@ function PodcastPanel({ doc, documentId, authedFetch }) {
 
       {documentId && (
         <div style={styles.regenBox}>
-          <p style={styles.regenLabel}>Tap a style to generate a new episode</p>
-          <div style={styles.regenRow}>
-            <div style={styles.segmentGroup}>
-              {PODCAST_STYLES.map((opt) => {
-                const isBusy = scriptBusy === opt.id;
-                return (
-                  <button
-                    key={opt.id}
-                    style={{
-                      ...styles.segmentBtn,
-                      ...(podcastStyle === opt.id ? styles.segmentBtnActive : {}),
-                      opacity: scriptBusy && !isBusy ? 0.5 : 1,
-                    }}
-                    onClick={() => regenerateScript(opt.id)}
-                    disabled={!!scriptBusy || audioState === "generating"}
-                  >
-                    {isBusy && (
-                      <span
-                        className="spinner"
-                        style={{ width: 12, height: 12, borderWidth: 2, marginRight: 6, ...(podcastStyle === opt.id ? { borderColor: "rgba(255,255,255,0.4)", borderTopColor: "#fff" } : {}) }}
-                      />
-                    )}
-                    {isBusy ? "Writing script…" : opt.label}
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-          {scriptError && <p style={{ ...styles.resultSub, margin: "8px 0 0", color: "#b03d2e" }}>{scriptError}</p>}
+          <RegenActions
+            heading="Regenerate episode"
+            options={PODCAST_STYLES}
+            activeId={podcastStyle}
+            busyId={scriptBusy}
+            disabled={!!scriptBusy || audioState === "generating"}
+            onPick={(id) => regenerateScript(id)}
+          />
+          {scriptBusy && (
+            <p style={styles.regenStatus}>Writing a new script, then generating its audio — this can take a minute.</p>
+          )}
+          {scriptError && <p style={{ ...styles.resultSub, margin: "12px 0 0", color: "#b03d2e" }}>{scriptError}</p>}
         </div>
       )}
 
@@ -1683,47 +1694,62 @@ const styles = {
   summaryItem: { display: "flex", gap: 14, fontSize: 15, lineHeight: 1.6, alignItems: "flex-start" },
   summaryNum: { color: moss, fontWeight: 700, fontSize: 13, fontVariantNumeric: "tabular-nums", marginTop: 2 },
   regenBox: { marginTop: 28, paddingTop: 20, borderTop: `1px solid ${line}` },
-  regenLabel: { fontSize: 12.5, fontWeight: 700, color: muted, letterSpacing: 0.3, marginBottom: 10 },
-  regenRow: { display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center" },
-  segmentGroup: { display: "flex", flexWrap: "wrap", border: `1px solid ${line}`, borderRadius: 10, overflow: "hidden" },
-  segmentBtn: {
+  regenSection: { marginBottom: 4 },
+  regenHeading: { fontSize: 12.5, fontWeight: 700, color: muted, letterSpacing: 0.3, marginBottom: 10 },
+  regenActions: { display: "flex", flexWrap: "wrap", gap: 8 },
+  regenActionBtn: {
     display: "inline-flex",
     alignItems: "center",
-    justifyContent: "center",
+    gap: 7,
     background: "#fff",
-    border: "none",
-    color: muted,
-    padding: "9px 14px",
-    fontSize: 13,
+    border: `1.5px solid ${line}`,
+    color: mossDeep,
+    borderRadius: 10,
+    padding: "9px 15px",
+    fontSize: 13.5,
     fontWeight: 600,
-    cursor: "pointer",
     fontFamily: "inherit",
   },
-  segmentBtnActive: { background: moss, color: "#fff" },
-  focusForm: { display: "flex", flex: "1 1 220px", gap: 8, alignItems: "center" },
-  regenFocusInput: {
-    flex: "1 1 160px",
-    minWidth: 120,
+  regenActionBtnCurrent: { background: "#eef4f0", borderColor: moss },
+  regenCurrentTag: {
+    fontSize: 10.5,
+    fontWeight: 700,
+    letterSpacing: 0.4,
+    textTransform: "uppercase",
+    color: moss,
+    background: "#dcebe2",
+    borderRadius: 5,
+    padding: "1px 5px",
+    marginLeft: 2,
+  },
+  regenStatus: { fontSize: 13, color: muted, margin: "12px 0 0" },
+  focusBlock: { marginTop: 18 },
+  focusLabel: { fontSize: 12.5, fontWeight: 700, color: muted, letterSpacing: 0.3, marginBottom: 8 },
+  focusInputRow: { display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" },
+  focusInput: {
+    flex: "1 1 180px",
+    minWidth: 140,
     border: `1px solid ${line}`,
     borderRadius: 10,
-    padding: "8px 12px",
+    padding: "9px 13px",
     fontSize: 13.5,
     fontFamily: "inherit",
     outline: "none",
     background: paper,
   },
-  focusGoBtn: {
+  focusGenBtn: {
     display: "inline-flex",
     alignItems: "center",
-    justifyContent: "center",
-    width: 36,
-    height: 36,
+    gap: 7,
     flexShrink: 0,
     background: moss,
     color: "#fff",
     border: "none",
     borderRadius: 10,
-    cursor: "pointer",
+    padding: "9px 16px",
+    fontSize: 13.5,
+    fontWeight: 600,
+    fontFamily: "inherit",
   },
   qBlock: { marginBottom: 24 },
   qText: { fontSize: 15.5, fontWeight: 500, lineHeight: 1.5, margin: "0 0 12px", display: "flex", gap: 10 },
