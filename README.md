@@ -13,7 +13,7 @@ A React/Vite study app that turns an uploaded PDF into a study workflow: Gemini-
 - Interactive quiz with scoring and weak-topic feedback; generate a fresh, non-repeating set of questions on demand, and every attempt is saved so past scores and answers can be reviewed later
 - Summary can be regenerated with a different length (concise/detailed) or focused on a specific topic in the document
 - Podcast player with generated transcript; regenerate the script in a different style (two-host conversation, solo narrator, or interview) at any time
-- AI podcast audio: two distinct voices read the generated script. Uses **Gemini TTS by default** (much cheaper, reuses the Gemini key); ElevenLabs is still supported via `TTS_PROVIDER=elevenlabs`. Once generated for a document, audio is cached in Firestore and reused free on later visits
+- Podcast playback defaults to the **browser's own built-in voice** (Web Speech API) — completely free, instant, no API call, no quota, works for every episode with zero setup. An optional "Generate AI-narrated audio" button still exists for higher-quality narration: it uses **Gemini TTS by default** (cheaper, reuses the Gemini key) or ElevenLabs via `TTS_PROVIDER=elevenlabs`, and only runs when explicitly tapped (never automatically) since it's a paid/quota-limited call. Once generated for a document, that AI audio is cached in Firestore and reused free on later visits
 - Chat and summary text render markdown (bold, lists, etc.) instead of showing raw asterisks
 - Tutor chat answering questions scoped to the uploaded PDF via Gemini
 - "Try it with a sample document" demo mode that works without signing in

@@ -129,7 +129,18 @@ then overwrites stored `podcast` (`api/index.py:1390`). Input `PodcastRegenerate
 
 ---
 
-## 2. Podcast text-to-speech — Gemini TTS (default) or ElevenLabs
+## 2. Podcast text-to-speech — free browser voice (default player) or paid AI narration
+
+**The default podcast player calls no external API at all.** It uses the browser's
+built-in Web Speech API (`window.speechSynthesis`) entirely client-side —
+`pickBrowserVoices()` (`src/App.jsx:937`) and the playback functions in `PodcastPanel`
+(`src/App.jsx:1006-1049`). Free, instant, no quota, works offline. This is what's shown
+first in the UI ("Play episode").
+
+A separate, explicitly opt-in **"Generate AI-narrated audio"** button (never triggered
+automatically — it's a paid/quota-limited call) uses the backend endpoint below.
+
+**Backend AI narration — Gemini TTS (default) or ElevenLabs**
 
 Each podcast transcript line is synthesised to audio. The backend is selected by
 **`TTS_PROVIDER`** (`api/index.py:55`), default **`gemini`** (much cheaper); set
@@ -137,8 +148,9 @@ Each podcast transcript line is synthesised to audio. The backend is selected by
 selected one runs. Dispatch is in the segment-audio handler (`api/index.py:1536`).
 
 **Endpoint:** `POST /api/podcast/segment-audio` — handler at `api/index.py:1515`
-**Frontend call site:** `src/App.jsx:1062` (`PodcastPanel`'s `ensureSegmentUrl()`). The
-frontend is provider-agnostic: it reads `res.blob()` and plays it, so WAV or MP3 both work.
+**Frontend call site:** `src/App.jsx:1150` (`PodcastPanel`'s `ensureSegmentUrl()`, only
+called once the user taps "Generate AI-narrated audio"). The frontend is
+provider-agnostic: it reads `res.blob()` and plays it, so WAV or MP3 both work.
 
 A cache check runs first (`api/index.py:1521`): if `document_id` + `segment_index` are given
 and that segment was already generated, the stored bytes are returned with their stored MIME

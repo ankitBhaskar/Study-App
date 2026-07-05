@@ -930,6 +930,28 @@ const PODCAST_STYLES = [
   { id: "interview", label: "Interview" },
 ];
 
+// Picks two distinct voices for the two hosts from the browser's built-in
+// text-to-speech voices (Web Speech API) — completely free, no API calls,
+// no quota, works offline. Voice lists load asynchronously in some browsers
+// (Chrome fires `voiceschanged`), so this waits for that if needed.
+function pickBrowserVoices() {
+  return new Promise((resolve) => {
+    const synth = window.speechSynthesis;
+    const tryPick = () => {
+      const voices = synth.getVoices();
+      if (!voices.length) return false;
+      const english = voices.filter((v) => v.lang?.toLowerCase().startsWith("en"));
+      const pool = english.length >= 2 ? english : voices;
+      resolve({ a: pool[0] || null, b: pool[1] || pool[0] || null });
+      return true;
+    };
+    if (tryPick()) return;
+    synth.onvoiceschanged = tryPick;
+    // Some browsers never fire voiceschanged; fall back to whatever's loaded.
+    setTimeout(tryPick, 500);
+  });
+}
+
 function PodcastPanel({ doc, documentId, authedFetch }) {
   // Local copy so regenerating the script never overwrites doc.podcast —
   // same pattern QuizPanel/SummaryPanel use for their own active content.
@@ -957,10 +979,74 @@ function PodcastPanel({ doc, documentId, authedFetch }) {
   // ref rather than state — playback reads it without forcing re-renders.
   const urlsRef = useRef([]);
 
+  // Free playback via the browser's built-in voices (Web Speech API) — no
+  // backend call, no API cost, no quota, so this is always available and
+  // never errors the way the paid AI-audio generation below can.
+  const speechSupported = typeof window !== "undefined" && "speechSynthesis" in window;
+  const [browserPlaying, setBrowserPlaying] = useState(false);
+  const [browserIdx, setBrowserIdx] = useState(0);
+  const browserVoicesRef = useRef({ a: null, b: null });
+
   useEffect(() => {
     setPodcast(doc.podcast);
     setScriptError("");
+    if (speechSupported) window.speechSynthesis.cancel();
+    setBrowserPlaying(false);
+    setBrowserIdx(0);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [doc]);
+
+  useEffect(() => {
+    return () => {
+      if (speechSupported) window.speechSynthesis.cancel();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const speakSegment = async (i) => {
+    if (i >= transcript.length) {
+      setBrowserPlaying(false);
+      setBrowserIdx(0);
+      return;
+    }
+    if (!browserVoicesRef.current.a && !browserVoicesRef.current.b) {
+      browserVoicesRef.current = await pickBrowserVoices();
+    }
+    const seg = transcript[i];
+    const utter = new SpeechSynthesisUtterance(seg.line);
+    utter.voice = seg.who === hosts[0] ? browserVoicesRef.current.a : browserVoicesRef.current.b;
+    utter.rate = 1;
+    utter.onend = () => speakSegment(i + 1);
+    utter.onerror = (e) => {
+      // "interrupted"/"canceled" fire on Stop or skip — not real errors.
+      if (e.error !== "interrupted" && e.error !== "canceled") setBrowserPlaying(false);
+    };
+    setBrowserIdx(i);
+    window.speechSynthesis.speak(utter);
+  };
+
+  const toggleBrowserVoice = () => {
+    if (!speechSupported) return;
+    if (browserPlaying) {
+      window.speechSynthesis.cancel();
+      setBrowserPlaying(false);
+      return;
+    }
+    // Only one voice plays at a time — stop any AI audio first.
+    audioRef.current?.pause();
+    setPlaying(false);
+    setBrowserPlaying(true);
+    speakSegment(browserIdx < transcript.length ? browserIdx : 0);
+  };
+
+  const jumpBrowserVoice = (i) => {
+    if (!speechSupported) return;
+    window.speechSynthesis.cancel();
+    audioRef.current?.pause();
+    setPlaying(false);
+    setBrowserPlaying(true);
+    speakSegment(i);
+  };
 
   const revokeUrls = () => {
     urlsRef.current.forEach((u) => u && URL.revokeObjectURL(u));
@@ -984,21 +1070,23 @@ function PodcastPanel({ doc, documentId, authedFetch }) {
       if (!res.ok) throw new Error(data?.detail || `Could not generate a new script (error ${res.status}).`);
       // The new script no longer lines up with any previously generated
       // audio (the backend already dropped that stale cache), so reset
-      // playback state along with swapping in the new transcript.
+      // playback state along with swapping in the new transcript. AI audio
+      // is NOT auto-generated here — that's a paid/quota-limited call, so
+      // it only runs when the user explicitly asks for it below. The free
+      // browser-voice player is always ready immediately, no generation step.
       audioRef.current?.pause();
       revokeUrls();
+      if (speechSupported) window.speechSynthesis.cancel();
       setPlaying(false);
       setPlayingIdx(0);
       setSegProgress(0);
       setAudioError("");
       setAudioState("idle");
+      setBrowserPlaying(false);
+      setBrowserIdx(0);
       setPodcastStyle(style);
       setPodcast(data.podcast);
       setScriptBusy(null);
-      // Chain straight into audio for the fresh script. Passing the new
-      // podcast explicitly — the `podcast` state variable in this closure
-      // still holds the previous script.
-      await generateAudioFor(data.podcast);
     } catch (err) {
       setScriptBusy(null);
       setScriptError(
@@ -1147,6 +1235,11 @@ function PodcastPanel({ doc, documentId, authedFetch }) {
   };
 
   const toggle = () => {
+    // Only one voice plays at a time — stop the free browser voice first.
+    if (browserPlaying) {
+      window.speechSynthesis.cancel();
+      setBrowserPlaying(false);
+    }
     const a = audioRef.current;
     if (playing) {
       a?.pause();
@@ -1185,17 +1278,33 @@ function PodcastPanel({ doc, documentId, authedFetch }) {
             disabled={!!scriptBusy || audioState === "generating"}
             onPick={(id) => regenerateScript(id)}
           />
-          {scriptBusy && (
-            <p style={styles.regenStatus}>Writing a new script, then generating its audio — this can take a minute.</p>
-          )}
+          {scriptBusy && <p style={styles.regenStatus}>Writing a new script…</p>}
           {scriptError && <p style={{ ...styles.resultSub, margin: "12px 0 0", color: "#b03d2e" }}>{scriptError}</p>}
+        </div>
+      )}
+
+      {speechSupported && (
+        <div className="player" style={styles.player}>
+          <button
+            style={styles.playBtn}
+            onClick={toggleBrowserVoice}
+            aria-label={browserPlaying ? "Pause" : "Play"}
+          >
+            {browserPlaying ? <Pause size={20} /> : <Play size={20} style={{ marginLeft: 2 }} />}
+          </button>
+          <div style={{ flex: 1 }}>
+            <div style={styles.timeRow}>
+              <span>{browserPlaying ? `Segment ${browserIdx + 1} / ${transcript.length}` : "Play episode"}</span>
+              <span style={styles.freeTag}>Free · your device's voice</span>
+            </div>
+          </div>
         </div>
       )}
 
       <div style={styles.audioBar}>
         {audioState === "idle" && (
           <button style={styles.audioBtn} onClick={generateAudio}>
-            <Sparkles size={15} /> Generate AI audio
+            <Sparkles size={15} /> Generate AI-narrated audio
           </button>
         )}
         {audioState === "generating" && (
@@ -1240,18 +1349,21 @@ function PodcastPanel({ doc, documentId, authedFetch }) {
       <div className="transcript" style={styles.transcript}>
         <p style={styles.transcriptLabel}>Transcript</p>
         {transcript.map((seg, i) => {
-          const active = audioReady && i === playingIdx;
+          // AI audio (once generated) takes priority for the "now playing"
+          // highlight; otherwise clicking a line jumps the free browser voice.
+          const active = audioReady ? i === playingIdx : browserPlaying && i === browserIdx;
+          const clickable = audioReady || speechSupported;
           return (
             <div
               key={i}
               className="segment"
               style={{
-                opacity: audioReady ? (active ? 1 : 0.45) : 1,
-                cursor: audioReady ? "pointer" : "default",
+                opacity: clickable ? (active ? 1 : 0.45) : 1,
+                cursor: clickable ? "pointer" : "default",
               }}
-              onClick={() => audioReady && playSegment(i)}
+              onClick={() => (audioReady ? playSegment(i) : jumpBrowserVoice(i))}
             >
-              <span style={styles.segTime}>{audioReady ? `#${i + 1}` : seg.t}</span>
+              <span style={styles.segTime}>{clickable ? `#${i + 1}` : seg.t}</span>
               <span style={{ ...styles.segWho, color: seg.who === hosts[0] ? moss : amber }}>
                 {seg.who}
               </span>
@@ -1943,6 +2055,7 @@ const styles = {
     marginTop: 8,
     fontVariantNumeric: "tabular-nums",
   },
+  freeTag: { color: moss, fontWeight: 600 },
   transcript: { borderTop: `1px solid ${line}`, paddingTop: 18 },
   transcriptLabel: {
     textTransform: "uppercase",
