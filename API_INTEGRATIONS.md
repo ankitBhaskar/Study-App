@@ -185,8 +185,14 @@ selected one runs. Dispatch is in the segment-audio handler (`api/index.py:1732`
 once the user taps "Generate AI-narrated audio"). `generateAudioFor` fetches segments
 **strictly sequentially** — a cache miss generates a whole batch server-side, so two
 concurrent misses would each fire an expensive batch call and trip the free tier's
-3-requests/minute limit. The frontend is provider-agnostic: it reads `res.blob()` and plays
-it, so WAV or MP3 both work.
+3-requests/minute limit. Fetches go through `fetchSegmentWithRecovery()`: a batch request
+can sit minutes with nothing on the wire and mobile networks/proxies kill idle connections,
+but the serverless function keeps running and caches the batch anyway — so on a network
+drop or gateway 5xx the frontend polls `GET /api/podcast/audio-status/{doc_id}` (free)
+until the segment appears cached, then re-requests it as an instant cache hit; it only
+re-generates if the segment never appears (3 attempts total, non-5xx HTTP errors thrown
+immediately). The frontend is provider-agnostic: it reads `res.blob()` and plays it, so WAV
+or MP3 both work.
 
 A cache check runs first (`api/index.py:1716`): if `document_id` + `segment_index` are given
 and that segment was already generated, the stored bytes are returned with their stored MIME

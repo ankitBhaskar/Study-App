@@ -1164,12 +1164,51 @@ function PodcastPanel({ doc, documentId, authedFetch }) {
     });
     if (!res.ok) {
       const data = await res.json().catch(() => null);
-      throw new Error(data?.detail || `The audio service returned an error (${res.status}).`);
+      const err = new Error(data?.detail || `The audio service returned an error (${res.status}).`);
+      err.status = res.status;
+      throw err;
     }
     const blob = await res.blob();
     const url = URL.createObjectURL(blob);
     urlsRef.current[i] = url;
     return url;
+  };
+
+  const segmentCachedOnServer = async (i) => {
+    if (!documentId) return false;
+    try {
+      const res = await authedFetch(`/api/podcast/audio-status/${documentId}`);
+      if (!res.ok) return false;
+      const data = await res.json();
+      return Array.isArray(data.cached_segments) && data.cached_segments.includes(i);
+    } catch {
+      return false;
+    }
+  };
+
+  // A batch generation can take minutes with nothing on the wire, and
+  // mobile networks/proxies kill idle connections — but the server keeps
+  // generating and CACHES the batch even after the browser's connection
+  // drops. So on a network failure (or gateway 5xx), don't give up and
+  // don't immediately re-generate: poll the cheap status endpoint until
+  // the segment shows up cached, then re-request it as an instant cache
+  // hit. Only if it never appears do we retry generation for real.
+  const fetchSegmentWithRecovery = async (i, pod) => {
+    let lastErr;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        return await ensureSegmentUrl(i, pod);
+      } catch (err) {
+        lastErr = err;
+        const recoverable = err instanceof TypeError || (err.status && err.status >= 500);
+        if (!recoverable) throw err;
+        for (let poll = 0; poll < 18; poll++) {
+          await new Promise((resolve) => setTimeout(resolve, 5000));
+          if (await segmentCachedOnServer(i)) break;
+        }
+      }
+    }
+    throw lastErr;
   };
 
   const generateAudioFor = async (pod) => {
@@ -1185,7 +1224,7 @@ function PodcastPanel({ doc, documentId, authedFetch }) {
       // each miss pays for its batch once and the segments after it are
       // instant cache hits. (ElevenLabs just runs one request at a time.)
       for (let i = 0; i < pod.transcript.length; i++) {
-        await ensureSegmentUrl(i, pod);
+        await fetchSegmentWithRecovery(i, pod);
         setGenProgress(i + 1);
       }
       setPlayingIdx(0);
@@ -1204,7 +1243,7 @@ function PodcastPanel({ doc, documentId, authedFetch }) {
   const playSegment = async (i) => {
     let url;
     try {
-      url = await ensureSegmentUrl(i);
+      url = await fetchSegmentWithRecovery(i, podcast);
     } catch (err) {
       setPlaying(false);
       setAudioError(
