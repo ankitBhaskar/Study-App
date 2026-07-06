@@ -1178,8 +1178,16 @@ function PodcastPanel({ doc, documentId, authedFetch }) {
     setGenProgress(0);
     try {
       urlsRef.current = new Array(pod.transcript.length).fill(null);
-      let next = 0;
+      // Fetch the first segment ALONE before starting the workers: on the
+      // Gemini path that single request generates and caches the whole
+      // episode server-side, so everything after it is a free cache hit.
+      // Two concurrent cold requests would each fire a full-episode Gemini
+      // call and trip the free tier's 3-requests/minute limit.
       let done = 0;
+      await ensureSegmentUrl(0, pod);
+      done += 1;
+      setGenProgress(done);
+      let next = 1;
       // ElevenLabs free tier allows 2 concurrent requests.
       const worker = async () => {
         while (next < pod.transcript.length) {
