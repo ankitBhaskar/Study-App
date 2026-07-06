@@ -1227,6 +1227,11 @@ function PodcastPanel({ doc, documentId, authedFetch }) {
         await fetchSegmentWithRecovery(i, pod);
         setGenProgress(i + 1);
       }
+      // The free browser-voice player is hidden once AI audio is ready, so
+      // stop any browser speech now — otherwise it would keep talking with
+      // its pause button gone.
+      if (window.speechSynthesis) window.speechSynthesis.cancel();
+      setBrowserPlaying(false);
       setPlayingIdx(0);
       setSegProgress(0);
       setAudioState("ready");
@@ -1320,7 +1325,9 @@ function PodcastPanel({ doc, documentId, authedFetch }) {
         </div>
       )}
 
-      {speechSupported && (
+      {/* Once AI-narrated audio exists, its player below replaces the free
+          browser-voice option — two stacked play buttons read as clutter. */}
+      {speechSupported && !audioReady && (
         <div className="player" style={styles.player}>
           <button
             style={styles.playBtn}
