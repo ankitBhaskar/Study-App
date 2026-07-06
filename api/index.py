@@ -1534,6 +1534,108 @@ async def gemini_tts(text: str, speaker: int) -> tuple[bytes, str]:
     return pcm_to_wav(pcm, sample_rate), "audio/wav"
 
 
+def _split_pcm_by_chars(pcm: bytes, char_counts: list[int], bits: int = 16) -> list[bytes]:
+    """Slice one combined PCM buffer into per-segment chunks, sized
+    proportionally to each segment's share of the script's character count.
+    This is a heuristic — spoken pacing isn't perfectly linear in text
+    length — but it's the only boundary signal available once Gemini
+    returns a single audio blob for a multi-segment script, and it keeps
+    boundaries aligned to whole samples so no chunk starts mid-sample."""
+    bytes_per_sample = bits // 8
+    total_chars = sum(char_counts) or 1
+    total_samples = len(pcm) // bytes_per_sample
+    chunks: list[bytes] = []
+    sample_cursor = 0
+    chars_cursor = 0
+    for index, chars in enumerate(char_counts):
+        chars_cursor += chars
+        if index == len(char_counts) - 1:
+            end_sample = total_samples
+        else:
+            end_sample = round(total_samples * chars_cursor / total_chars)
+        chunks.append(pcm[sample_cursor * bytes_per_sample : end_sample * bytes_per_sample])
+        sample_cursor = end_sample
+    return chunks
+
+
+async def gemini_tts_episode(transcript: list[dict[str, Any]], hosts: list[str]) -> list[tuple[bytes, str]]:
+    """Generate audio for a WHOLE podcast episode in a single Gemini call
+    (using multi-speaker TTS when there are two hosts), then slice the
+    combined PCM into per-segment WAV clips. This replaces calling
+    gemini_tts() once per segment — up to a dozen calls for one episode —
+    with exactly one call regardless of segment count, which is both far
+    cheaper against the free-tier rate limit and less likely to hit a
+    transient Gemini error."""
+    api_key = get_gemini_api_key()
+    if not api_key:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Gemini API key is not configured. Add GEMINI_API_KEY in your Vercel project settings "
+                "(Settings → Environment Variables) and redeploy, or set it in a local .env file."
+            ),
+        )
+
+    host_a = (hosts[0] if hosts else "") or "Host A"
+    host_b = (hosts[1] if len(hosts) > 1 else "") or "Host B"
+    if host_b == host_a:
+        host_b = f"{host_a} 2"
+
+    lines = [str(seg.get("line") or "") for seg in transcript]
+    # Match the frontend's own speaker-index mapping (seg.who === hosts[0] ?
+    # 0 : 1) so cached audio lines up with which voice the UI expects.
+    labels = [host_a if str(seg.get("who")) == (hosts[0] if hosts else host_a) else host_b for seg in transcript]
+    speaker_count = len(set(labels))
+
+    combined_text = "\n".join(f"{label}: {line}" for label, line in zip(labels, lines))
+    generation_config: dict[str, Any] = {"responseModalities": ["AUDIO"]}
+    if speaker_count <= 1:
+        generation_config["speechConfig"] = {
+            "voiceConfig": {"prebuiltVoiceConfig": {"voiceName": GEMINI_TTS_VOICE_A}}
+        }
+    else:
+        generation_config["speechConfig"] = {
+            "multiSpeakerVoiceConfig": {
+                "speakerVoiceConfigs": [
+                    {"speaker": host_a, "voiceConfig": {"prebuiltVoiceConfig": {"voiceName": GEMINI_TTS_VOICE_A}}},
+                    {"speaker": host_b, "voiceConfig": {"prebuiltVoiceConfig": {"voiceName": GEMINI_TTS_VOICE_B}}},
+                ]
+            }
+        }
+
+    url = f"{GEMINI_API_BASE}/models/{GEMINI_TTS_MODEL}:generateContent"
+    body = {"contents": [{"parts": [{"text": combined_text}]}], "generationConfig": generation_config}
+
+    async with httpx.AsyncClient(timeout=GEMINI_TIMEOUT_SECONDS) as client:
+        try:
+            response = await client.post(url, headers={"x-goog-api-key": api_key}, json=body)
+        except httpx.HTTPError as exc:
+            raise HTTPException(status_code=502, detail=f"Could not reach the Gemini API: {exc}") from exc
+
+    if response.status_code != 200:
+        try:
+            message = response.json()["error"]["message"]
+        except Exception:
+            message = response.text[:500]
+        raise HTTPException(status_code=502, detail=f"Gemini TTS error ({response.status_code}): {message}")
+
+    data = response.json()
+    try:
+        part = data["candidates"][0]["content"]["parts"][0]
+        inline = part.get("inlineData") or part.get("inline_data")
+        pcm = base64.b64decode(inline["data"])
+        mime = inline.get("mimeType") or inline.get("mime_type") or ""
+    except (KeyError, IndexError, TypeError):
+        raise HTTPException(status_code=502, detail="Gemini TTS returned an unexpected response shape.")
+
+    match = re.search(r"rate=(\d+)", mime)
+    sample_rate = int(match.group(1)) if match else 24000
+
+    char_counts = [max(len(line), 1) for line in lines]
+    pcm_chunks = _split_pcm_by_chars(pcm, char_counts)
+    return [(pcm_to_wav(chunk, sample_rate), "audio/wav") for chunk in pcm_chunks]
+
+
 @app.post("/api/podcast/segment-audio")
 async def podcast_segment_audio(
     request: SegmentAudioRequest, user: AuthedUser = Depends(require_user)
@@ -1557,11 +1659,40 @@ async def podcast_segment_audio(
     # TTS_PROVIDER=elevenlabs.
     if TTS_PROVIDER == "elevenlabs":
         audio_bytes, mime = await elevenlabs_tts(text, request.speaker)
-    else:
-        audio_bytes, mime = await gemini_tts(text, request.speaker)
+        if has_cache_key:
+            save_segment_audio(user.uid, request.document_id, request.segment_index, audio_bytes, mime)
+        increment_usage(user.uid)
+        return Response(content=audio_bytes, media_type=mime)
 
+    # Gemini path: when the request is tied to a saved document, generate
+    # the whole episode's audio in ONE Gemini call and cache every segment
+    # from it at once, instead of one call per segment.
+    episode_result: list[tuple[bytes, str]] | None = None
+    if has_cache_key:
+        db = get_firestore_client()
+        doc_snapshot = (
+            db.collection("users").document(user.uid).collection("documents").document(request.document_id).get()
+            if db is not None
+            else None
+        )
+        doc_data = doc_snapshot.to_dict() if doc_snapshot is not None and doc_snapshot.exists else None
+        podcast_data = (doc_data or {}).get("podcast") or {}
+        transcript = podcast_data.get("transcript") or []
+        hosts = podcast_data.get("hosts") or []
+        if transcript and request.segment_index < len(transcript):
+            episode_result = await gemini_tts_episode(transcript, hosts)
+
+    if episode_result is not None:
+        for index, (seg_bytes, seg_mime) in enumerate(episode_result):
+            save_segment_audio(user.uid, request.document_id, index, seg_bytes, seg_mime)
+        increment_usage(user.uid)
+        audio_bytes, mime = episode_result[request.segment_index]
+        return Response(content=audio_bytes, media_type=mime)
+
+    # Fallback: no saved document to read the full script from (or the
+    # index didn't line up with it) — generate just this one segment.
+    audio_bytes, mime = await gemini_tts(text, request.speaker)
     if has_cache_key:
         save_segment_audio(user.uid, request.document_id, request.segment_index, audio_bytes, mime)
-
     increment_usage(user.uid)
     return Response(content=audio_bytes, media_type=mime)

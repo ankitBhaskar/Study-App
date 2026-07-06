@@ -178,16 +178,49 @@ automatically — it's a paid/quota-limited call) uses the backend endpoint belo
 Each podcast transcript line is synthesised to audio. The backend is selected by
 **`TTS_PROVIDER`** (`api/index.py:55`), default **`gemini`** (much cheaper); set
 `TTS_PROVIDER=elevenlabs` to use ElevenLabs instead. Both paths live in the code; only the
-selected one runs. Dispatch is in the segment-audio handler (`api/index.py:1558`).
+selected one runs. Dispatch is in the segment-audio handler (`api/index.py:1660`).
 
-**Endpoint:** `POST /api/podcast/segment-audio` — handler at `api/index.py:1537`
+**Endpoint:** `POST /api/podcast/segment-audio` — handler at `api/index.py:1639`
 **Frontend call site:** `src/App.jsx:1150` (`PodcastPanel`'s `ensureSegmentUrl()`, only
 called once the user taps "Generate AI-narrated audio"). The frontend is
 provider-agnostic: it reads `res.blob()` and plays it, so WAV or MP3 both work.
 
-A cache check runs first (`api/index.py:1543`): if `document_id` + `segment_index` are given
+A cache check runs first (`api/index.py:1645`): if `document_id` + `segment_index` are given
 and that segment was already generated, the stored bytes are returned with their stored MIME
 (no TTS call). See §4.
+
+**Gemini path generates the whole episode in ONE call, not one call per segment.** When a
+Gemini-provider request carries a `document_id` + `segment_index` (i.e. it's tied to a saved
+document, not an ad-hoc preview), the handler (`api/index.py:1667-1690`) fetches that
+document's full transcript from Firestore and calls `gemini_tts_episode()`
+(`api/index.py:1561-1636`) exactly once for the entire script, then caches every resulting
+segment via `save_segment_audio()` and calls `increment_usage()` once for the whole episode.
+This replaced an earlier one-call-per-segment design (up to ~12 Gemini calls for one podcast)
+that both burned through the free-tier rate limit and multiplied the chance of hitting a
+transient Gemini error on any single call. If there's no matching document/transcript (e.g.
+an ad-hoc single-line preview, or a race between two concurrent segment fetches on a cold
+cache), it falls back to the original single-segment `gemini_tts()` call
+(`api/index.py:1692-1698`). The ElevenLabs path (§2.2) is unchanged — it stays one call per
+segment, since ElevenLabs's TTS endpoint used here has no multi-speaker/whole-episode mode.
+
+- `gemini_tts_episode()` (`api/index.py:1561-1636`) builds one "SpeakerName: line" block of
+  text for the whole transcript (mirroring the frontend's own `seg.who === hosts[0] ? 0 : 1`
+  speaker mapping, `src/App.jsx:1158`), then calls Gemini once:
+  - **Two hosts speak in the transcript:** uses
+    `generationConfig.speechConfig.multiSpeakerVoiceConfig.speakerVoiceConfigs[]` (each host
+    name mapped to `GEMINI_TTS_VOICE_A`/`_B`) — Gemini synthesises both voices from the single
+    combined script in one response. Speaker name labels are a synthesis directive only; they
+    are not spoken aloud in the output audio.
+  - **Only one host speaks** (solo narration): falls back to the plain single-voice
+    `speechConfig.voiceConfig` shape (same as `gemini_tts()`, §2.1).
+  - The single PCM response is then sliced into one WAV clip per transcript segment by
+    `_split_pcm_by_chars()` (`api/index.py:1537-1558`) — sample boundaries are placed
+    proportional to each segment's share of the total character count (a heuristic, since
+    Gemini returns no per-segment timing), aligned to whole 16-bit samples.
+  - Per-segment caching (`MAX_CACHED_AUDIO_BYTES` = 740,000 bytes, `api/index.py:65`) is
+    preserved even though generation is now one call — a combined full-episode WAV (~10–15 MB
+    for a 4,500-char script) would blow Firestore's 1 MiB per-document cap, so each sliced
+    segment is still cached individually exactly as before.
 
 ### 2.1 Gemini TTS (default) — `gemini_tts()`, `api/index.py:1487-1534`
 
@@ -294,6 +327,6 @@ Deletes cascade to `audio`/`chat`/`quiz_attempts` via `_delete_document_and_subc
 | POST | `/api/documents/{doc_id}/summary/regenerate` | required | `api/index.py:1342` | Gemini, Firestore |
 | POST | `/api/documents/{doc_id}/podcast/regenerate` | required | `api/index.py:1377` | Gemini, Firestore |
 | GET | `/api/podcast/audio-status/{doc_id}` | required | `api/index.py:1417` | Firestore |
-| POST | `/api/podcast/segment-audio` | required | `api/index.py:1537` | Gemini TTS **or** ElevenLabs (on cache miss), Firestore |
+| POST | `/api/podcast/segment-audio` | required | `api/index.py:1639` | Gemini TTS (1 call/episode) **or** ElevenLabs (1 call/segment, on cache miss), Firestore |
 
 "Required" auth means `Depends(require_user)` — see §3.
