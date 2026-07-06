@@ -6,6 +6,7 @@ import {
   Clock,
   FileText,
   Headphones,
+  History,
   ListChecks,
   LogOut,
   MessageCircle,
@@ -258,10 +259,12 @@ export default function StudyMVP() {
     // fetched per-document so Tutor chat works on reopened documents.
     // Entries saved before text storage existed simply come back empty.
     let context = null;
+    let detail = null;
     try {
       const res = await authedFetch(`/api/documents/${entry.id}`);
       const data = await res.json().catch(() => null);
-      if (res.ok && data.document_context) context = data.document_context;
+      if (res.ok && data) detail = data;
+      if (detail?.document_context) context = detail.document_context;
     } catch {
       // fall through — tutor shows the re-upload notice instead
     }
@@ -275,6 +278,8 @@ export default function StudyMVP() {
       fromHistory: true,
       docFileName: entry.file_name,
       documentId: entry.id,
+      podcastStyle: detail?.podcast_style,
+      savedStyles: detail?.saved_styles,
     });
     setLoading(false);
     setStage("study");
@@ -339,6 +344,8 @@ export default function StudyMVP() {
         documentContext: data.document_context,
         docFileName: data.file_name,
         documentId: data.document_id,
+        podcastStyle: data.podcast_style,
+        savedStyles: data.saved_styles,
       });
       refreshHistory();
       refreshProfile();
@@ -591,7 +598,7 @@ function StudyScreen({ tab, setTab, fileName, doc, authedFetch }) {
 // Podcast so both tabs read identically: a labelled row of tappable action
 // buttons (not a toggle) where one tap starts generation, the tapped button
 // shows a spinner, and the option currently applied is marked "current".
-function RegenActions({ heading, options, activeId, busyId, disabled, onPick }) {
+function RegenActions({ heading, options, activeId, busyId, disabled, onPick, savedIds = [] }) {
   return (
     <div style={styles.regenSection}>
       <p style={styles.regenHeading}>{heading}</p>
@@ -599,6 +606,9 @@ function RegenActions({ heading, options, activeId, busyId, disabled, onPick }) 
         {options.map((opt) => {
           const isBusy = busyId === opt.id;
           const isCurrent = activeId === opt.id;
+          // A saved option loads instantly from storage — no AI call — so it
+          // shows a history icon instead of the AI-generation sparkle.
+          const isSaved = savedIds.includes(opt.id);
           return (
             <button
               key={opt.id}
@@ -615,10 +625,12 @@ function RegenActions({ heading, options, activeId, busyId, disabled, onPick }) 
                 <span className="spinner" style={{ width: 13, height: 13, borderWidth: 2 }} />
               ) : isCurrent ? (
                 <Check size={14} strokeWidth={2.6} />
+              ) : isSaved ? (
+                <History size={14} />
               ) : (
                 <Sparkles size={14} />
               )}
-              {isBusy ? "Generating…" : opt.label}
+              {isBusy ? (isSaved ? "Loading…" : "Generating…") : opt.label}
               {isCurrent && !isBusy && <span style={styles.regenCurrentTag}>current</span>}
             </button>
           );
@@ -958,7 +970,10 @@ function PodcastPanel({ doc, documentId, authedFetch }) {
   const [podcast, setPodcast] = useState(doc.podcast);
   const { duration, hosts, transcript } = podcast;
 
-  const [podcastStyle, setPodcastStyle] = useState("conversation");
+  const [podcastStyle, setPodcastStyle] = useState(doc.podcastStyle || "conversation");
+  // Styles that already have a saved script (and possibly audio) in storage
+  // — tapping one of those loads it instead of paying for a new generation.
+  const [savedStyles, setSavedStyles] = useState(doc.savedStyles || []);
   // Style id currently being generated (null when idle) — the spinner shows
   // inside the chip that was tapped, since tapping a chip IS the action.
   const [scriptBusy, setScriptBusy] = useState(null);
@@ -989,6 +1004,8 @@ function PodcastPanel({ doc, documentId, authedFetch }) {
 
   useEffect(() => {
     setPodcast(doc.podcast);
+    setPodcastStyle(doc.podcastStyle || "conversation");
+    setSavedStyles(doc.savedStyles || []);
     setScriptError("");
     if (speechSupported) window.speechSynthesis.cancel();
     setBrowserPlaying(false);
@@ -1086,7 +1103,26 @@ function PodcastPanel({ doc, documentId, authedFetch }) {
       setBrowserIdx(0);
       setPodcastStyle(style);
       setPodcast(data.podcast);
+      if (data.saved_styles) setSavedStyles(data.saved_styles);
       setScriptBusy(null);
+      // A reused (saved) version keeps its own audio in storage — if the
+      // whole episode is still cached, put the AI player straight back
+      // instead of showing the Generate button again.
+      if (data.reused && documentId) {
+        try {
+          const statusRes = await authedFetch(`/api/podcast/audio-status/${documentId}`);
+          const status = await statusRes.json().catch(() => null);
+          const cached = new Set(status?.cached_segments || []);
+          const segments = data.podcast?.transcript || [];
+          if (segments.length > 0 && segments.every((_, i) => cached.has(i))) {
+            urlsRef.current = new Array(segments.length).fill(null);
+            setAudioState("ready");
+          }
+        } catch {
+          // Status check failed — leave the player in "idle"; playback
+          // would still hit the cache on demand.
+        }
+      }
     } catch (err) {
       setScriptBusy(null);
       setScriptError(
@@ -1319,6 +1355,7 @@ function PodcastPanel({ doc, documentId, authedFetch }) {
             busyId={scriptBusy}
             disabled={!!scriptBusy || audioState === "generating"}
             onPick={(id) => regenerateScript(id)}
+            savedIds={savedStyles}
           />
           {scriptBusy && <p style={styles.regenStatus}>Writing a new script…</p>}
           {scriptError && <p style={{ ...styles.resultSub, margin: "12px 0 0", color: "#b03d2e" }}>{scriptError}</p>}

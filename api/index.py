@@ -182,6 +182,11 @@ class StudyAnalysisResponse(BaseModel):
     # against this document and reuse it on a later visit. None if Firestore
     # isn't configured or the document couldn't be saved.
     document_id: str | None = None
+    # Which podcast style the returned script is in, and which styles have a
+    # saved version — lets the UI mark those chips as load-from-storage
+    # instead of showing them as fresh AI generations.
+    podcast_style: str = "conversation"
+    saved_styles: list[str] = []
 
 
 class ChatTurn(BaseModel):
@@ -250,6 +255,11 @@ class PodcastRegenerateRequest(BaseModel):
 
 class PodcastRegenerateResponse(BaseModel):
     podcast: Podcast
+    podcast_style: str = "conversation"
+    saved_styles: list[str] = []
+    # True when the requested style already had a saved version and it was
+    # loaded from storage — no Gemini call, no usage charged.
+    reused: bool = False
 
 
 class SegmentAudioRequest(BaseModel):
@@ -291,6 +301,8 @@ class DocumentRecord(BaseModel):
 
 class DocumentDetail(DocumentRecord):
     document_context: str = ""
+    podcast_style: str = "conversation"
+    saved_styles: list[str] = []
 
 
 class DocumentListResponse(BaseModel):
@@ -428,36 +440,50 @@ def truncate_utf8(text: str, max_bytes: int) -> str:
     return encoded[:max_bytes].decode("utf-8", errors="ignore")
 
 
-def _audio_segment_ref(db, uid: str, doc_id: str, segment_index: int):
+def _audio_doc_id(ns: str, segment_index: int) -> str:
+    # Cached audio is namespaced per podcast style so switching styles keeps
+    # every generated version's audio. "legacy" is the namespace of audio
+    # cached before styles were versioned: plain integer document IDs.
+    return str(segment_index) if ns == "legacy" else f"{ns}.{segment_index}"
+
+
+def _audio_collection_ref(db, uid: str, doc_id: str):
     return (
         db.collection("users")
         .document(uid)
         .collection("documents")
         .document(doc_id)
         .collection("audio")
-        .document(str(segment_index))
     )
 
 
-def _audio_chunk_ref(db, uid: str, doc_id: str, segment_index: int, chunk: int):
-    # Overflow chunks live as sibling documents with a non-integer ID, so
-    # list_cached_segment_indices (which int()s document IDs) skips them and
-    # the collection-wide delete loops still clean them up.
-    return (
-        db.collection("users")
-        .document(uid)
-        .collection("documents")
-        .document(doc_id)
-        .collection("audio")
-        .document(f"{segment_index}.c{chunk}")
-    )
+def _audio_segment_ref(db, uid: str, doc_id: str, ns: str, segment_index: int):
+    return _audio_collection_ref(db, uid, doc_id).document(_audio_doc_id(ns, segment_index))
 
 
-def get_cached_segment_audio(uid: str, doc_id: str, segment_index: int) -> tuple[bytes, str] | None:
+def _audio_chunk_ref(db, uid: str, doc_id: str, ns: str, segment_index: int, chunk: int):
+    # Overflow chunks live as sibling documents whose IDs never parse as a
+    # segment (their suffix isn't an integer), so list_cached_segment_indices
+    # skips them and the collection-wide delete loops still clean them up.
+    return _audio_collection_ref(db, uid, doc_id).document(f"{_audio_doc_id(ns, segment_index)}.c{chunk}")
+
+
+def _active_audio_ns(data: dict[str, Any]) -> str:
+    # Which audio namespace the document's ACTIVE podcast script uses. A
+    # version generated after style-versioning stores audio under its style
+    # name; a version inherited from before it keeps the legacy integer IDs.
+    style = data.get("podcast_style")
+    versions = data.get("podcast_versions") or {}
+    if style and isinstance(versions.get(style), dict):
+        return versions[style].get("audio_ns") or style
+    return "legacy"
+
+
+def get_cached_segment_audio(uid: str, doc_id: str, ns: str, segment_index: int) -> tuple[bytes, str] | None:
     db = get_firestore_client()
     if db is None:
         return None
-    snapshot = _audio_segment_ref(db, uid, doc_id, segment_index).get()
+    snapshot = _audio_segment_ref(db, uid, doc_id, ns, segment_index).get()
     if not snapshot.exists:
         return None
     data = snapshot.to_dict() or {}
@@ -468,7 +494,7 @@ def get_cached_segment_audio(uid: str, doc_id: str, segment_index: int) -> tuple
     # Segments larger than one Firestore document are stored as extra chunk
     # documents; docs written before chunking existed have no "chunks" field.
     for chunk in range(1, int(data.get("chunks") or 1)):
-        chunk_snapshot = _audio_chunk_ref(db, uid, doc_id, segment_index, chunk).get()
+        chunk_snapshot = _audio_chunk_ref(db, uid, doc_id, ns, segment_index, chunk).get()
         chunk_data = (chunk_snapshot.to_dict() or {}) if chunk_snapshot.exists else {}
         chunk_encoded = chunk_data.get("data")
         if not chunk_encoded:
@@ -479,7 +505,7 @@ def get_cached_segment_audio(uid: str, doc_id: str, segment_index: int) -> tuple
     return b"".join(parts), data.get("mime", "audio/mpeg")
 
 
-def save_segment_audio(uid: str, doc_id: str, segment_index: int, audio_bytes: bytes, mime: str) -> None:
+def save_segment_audio(uid: str, doc_id: str, ns: str, segment_index: int, audio_bytes: bytes, mime: str) -> None:
     db = get_firestore_client()
     if db is None:
         return
@@ -493,10 +519,10 @@ def save_segment_audio(uid: str, doc_id: str, segment_index: int, audio_bytes: b
     # Extra chunks go in first so a reader never sees the main document
     # pointing at chunks that don't exist yet.
     for chunk_index, chunk_bytes in enumerate(chunks[1:], start=1):
-        _audio_chunk_ref(db, uid, doc_id, segment_index, chunk_index).set(
+        _audio_chunk_ref(db, uid, doc_id, ns, segment_index, chunk_index).set(
             {"data": base64.b64encode(chunk_bytes).decode("ascii")}
         )
-    _audio_segment_ref(db, uid, doc_id, segment_index).set(
+    _audio_segment_ref(db, uid, doc_id, ns, segment_index).set(
         {
             "data": base64.b64encode(chunks[0]).decode("ascii"),
             "mime": mime,
@@ -587,24 +613,25 @@ def list_quiz_attempts(uid: str, doc_id: str) -> list[QuizAttempt]:
     return attempts
 
 
-def list_cached_segment_indices(uid: str, doc_id: str) -> list[int]:
+def list_cached_segment_indices(uid: str, doc_id: str, ns: str) -> list[int]:
     db = get_firestore_client()
     if db is None:
         return []
-    audio_ref = (
-        db.collection("users")
-        .document(uid)
-        .collection("documents")
-        .document(doc_id)
-        .collection("audio")
-    )
     indices = []
     # Projecting to __name__ returns only the document IDs (the segment
     # indices), so the base64 audio payloads aren't downloaded just to
-    # report which segments are cached.
-    for snapshot in audio_ref.select(["__name__"]).stream():
+    # report which segments are cached. IDs are "{index}" (legacy ns) or
+    # "{style}.{index}"; chunk docs ("….c{n}") and other namespaces fail the
+    # int() parse or the prefix check and are skipped.
+    prefix = "" if ns == "legacy" else f"{ns}."
+    for snapshot in _audio_collection_ref(db, uid, doc_id).select(["__name__"]).stream():
+        candidate = snapshot.id
+        if prefix:
+            if not candidate.startswith(prefix):
+                continue
+            candidate = candidate[len(prefix):]
         try:
-            indices.append(int(snapshot.id))
+            indices.append(int(candidate))
         except ValueError:
             continue
     return sorted(indices)
@@ -1115,6 +1142,8 @@ async def get_document(doc_id: str, user: AuthedUser = Depends(require_user)) ->
         quiz=[QuizQuestion(**q) for q in data.get("quiz", [])],
         podcast=Podcast(**data.get("podcast", {"duration": "0:00", "hosts": [], "transcript": []})),
         document_context=data.get("document_context", ""),
+        podcast_style=data.get("podcast_style") or _guess_podcast_style(data.get("podcast") or {}),
+        saved_styles=sorted((data.get("podcast_versions") or {}).keys()),
     )
 
 
@@ -1220,6 +1249,11 @@ async def analyze_pdf(
                 "summary": summary,
                 "quiz": [q.model_dump() for q in quiz],
                 "podcast": podcast.model_dump(),
+                # Every generated style version is kept so switching styles
+                # later loads from storage instead of re-calling Gemini.
+                # audio_ns names the audio-cache namespace for this version.
+                "podcast_style": podcast_style,
+                "podcast_versions": {podcast_style: {**podcast.model_dump(), "audio_ns": podcast_style}},
                 "document_context": truncate_utf8(context, MAX_STORED_CONTEXT_BYTES),
                 "created_at": datetime.now(timezone.utc).isoformat(),
             }
@@ -1235,6 +1269,8 @@ async def analyze_pdf(
         podcast=podcast,
         document_context=context,
         document_id=document_id,
+        podcast_style=podcast_style,
+        saved_styles=[podcast_style],
     )
 
 
@@ -1416,16 +1452,44 @@ async def regenerate_summary(
     return SummaryRegenerateResponse(summary=summary)
 
 
+def _guess_podcast_style(podcast_data: dict[str, Any]) -> str:
+    # Documents saved before style versioning don't record which style their
+    # script is in; host count is the best available signal (solo scripts
+    # have one host, conversation/interview have two — default conversation).
+    return "solo" if len(podcast_data.get("hosts") or []) <= 1 else "conversation"
+
+
 @app.post("/api/documents/{doc_id}/podcast/regenerate", response_model=PodcastRegenerateResponse)
 async def regenerate_podcast(
     doc_id: str, request: PodcastRegenerateRequest, user: AuthedUser = Depends(require_user)
 ) -> PodcastRegenerateResponse:
-    check_usage_limit(user.uid)
-
     doc_ref, data = _get_document_or_404(user.uid, doc_id)
-    context = _require_document_context(data, "podcast script")
 
     style = request.style if request.style in PODCAST_STYLES else "conversation"
+
+    # One-time migration for documents saved before style versioning: adopt
+    # the current script as the saved version of its (guessed) style, keeping
+    # its already-cached audio reachable via the legacy namespace.
+    versions: dict[str, Any] = dict(data.get("podcast_versions") or {})
+    if not versions:
+        current = data.get("podcast") or {}
+        if current.get("transcript"):
+            versions[_guess_podcast_style(current)] = {**current, "audio_ns": "legacy"}
+
+    # Already generated in this style? Load it from storage — no Gemini
+    # call, no usage charge, and its cached audio (own namespace) survives.
+    saved = versions.get(style)
+    if isinstance(saved, dict) and saved.get("transcript"):
+        podcast = Podcast(**saved)
+        doc_ref.update(
+            {"podcast": podcast.model_dump(), "podcast_style": style, "podcast_versions": versions}
+        )
+        return PodcastRegenerateResponse(
+            podcast=podcast, podcast_style=style, saved_styles=sorted(versions), reused=True
+        )
+
+    check_usage_limit(user.uid)
+    context = _require_document_context(data, "podcast script")
     contents = [
         {
             "role": "user",
@@ -1445,15 +1509,22 @@ async def regenerate_podcast(
     if podcast is None:
         raise HTTPException(status_code=502, detail="Gemini response did not include a usable podcast script.")
 
-    # The new script's segments no longer line up with any cached audio
-    # (different text at the same indices), so drop the stale cache rather
-    # than risk mismatched audio playing over the new transcript.
-    for audio_doc in doc_ref.collection("audio").stream():
-        audio_doc.reference.delete()
+    # Only this style's audio namespace could hold stale clips (defensive —
+    # a fresh style normally has none); other styles' audio is untouched so
+    # switching back to them stays free.
+    db = get_firestore_client()
+    if db is not None:
+        prefix = f"{style}."
+        for audio_doc in _audio_collection_ref(db, user.uid, doc_id).select(["__name__"]).stream():
+            if audio_doc.id.startswith(prefix):
+                audio_doc.reference.delete()
 
-    doc_ref.update({"podcast": podcast.model_dump()})
+    versions[style] = {**podcast.model_dump(), "audio_ns": style}
+    doc_ref.update({"podcast": podcast.model_dump(), "podcast_style": style, "podcast_versions": versions})
     increment_usage(user.uid)
-    return PodcastRegenerateResponse(podcast=podcast)
+    return PodcastRegenerateResponse(
+        podcast=podcast, podcast_style=style, saved_styles=sorted(versions), reused=False
+    )
 
 
 @app.get("/api/podcast/audio-status/{doc_id}", response_model=AudioStatusResponse)
@@ -1461,9 +1532,15 @@ async def podcast_audio_status(
     doc_id: str, user: AuthedUser = Depends(require_user)
 ) -> AudioStatusResponse:
     # Lets the frontend restore the player after a reload: it reports which
-    # segments already have saved audio so cached playback needs no new
-    # ElevenLabs calls (and no usage-limit hits).
-    return AudioStatusResponse(cached_segments=list_cached_segment_indices(user.uid, doc_id))
+    # of the ACTIVE style's segments already have saved audio, so cached
+    # playback needs no new TTS calls (and no usage-limit hits).
+    db = get_firestore_client()
+    ns = "legacy"
+    if db is not None:
+        snapshot = db.collection("users").document(user.uid).collection("documents").document(doc_id).get()
+        if snapshot.exists:
+            ns = _active_audio_ns(snapshot.to_dict() or {})
+    return AudioStatusResponse(cached_segments=list_cached_segment_indices(user.uid, doc_id, ns))
 
 
 def pcm_to_wav(pcm: bytes, sample_rate: int, channels: int = 1, bits: int = 16) -> bytes:
@@ -1713,8 +1790,21 @@ async def podcast_segment_audio(
     request: SegmentAudioRequest, user: AuthedUser = Depends(require_user)
 ) -> Response:
     has_cache_key = request.document_id and request.segment_index is not None
+    # The document (when given) determines both the audio-cache namespace of
+    # its active style and the transcript for batch generation — fetch it
+    # once, before the cache check.
+    doc_data: dict[str, Any] | None = None
+    ns = "legacy"
     if has_cache_key:
-        cached = get_cached_segment_audio(user.uid, request.document_id, request.segment_index)
+        db = get_firestore_client()
+        doc_snapshot = (
+            db.collection("users").document(user.uid).collection("documents").document(request.document_id).get()
+            if db is not None
+            else None
+        )
+        doc_data = doc_snapshot.to_dict() if doc_snapshot is not None and doc_snapshot.exists else None
+        ns = _active_audio_ns(doc_data or {})
+        cached = get_cached_segment_audio(user.uid, request.document_id, ns, request.segment_index)
         if cached:
             audio_bytes, mime = cached
             return Response(content=audio_bytes, media_type=mime)
@@ -1732,7 +1822,7 @@ async def podcast_segment_audio(
     if TTS_PROVIDER == "elevenlabs":
         audio_bytes, mime = await elevenlabs_tts(text, request.speaker)
         if has_cache_key:
-            save_segment_audio(user.uid, request.document_id, request.segment_index, audio_bytes, mime)
+            save_segment_audio(user.uid, request.document_id, ns, request.segment_index, audio_bytes, mime)
         increment_usage(user.uid)
         return Response(content=audio_bytes, media_type=mime)
 
@@ -1741,13 +1831,6 @@ async def podcast_segment_audio(
     # call and cache all of them at once, instead of one call per segment.
     batch_result: list[tuple[int, bytes, str]] | None = None
     if has_cache_key:
-        db = get_firestore_client()
-        doc_snapshot = (
-            db.collection("users").document(user.uid).collection("documents").document(request.document_id).get()
-            if db is not None
-            else None
-        )
-        doc_data = doc_snapshot.to_dict() if doc_snapshot is not None and doc_snapshot.exists else None
         podcast_data = (doc_data or {}).get("podcast") or {}
         transcript = podcast_data.get("transcript") or []
         hosts = podcast_data.get("hosts") or []
@@ -1757,7 +1840,7 @@ async def podcast_segment_audio(
     if batch_result is not None:
         requested: tuple[bytes, str] | None = None
         for index, seg_bytes, seg_mime in batch_result:
-            save_segment_audio(user.uid, request.document_id, index, seg_bytes, seg_mime)
+            save_segment_audio(user.uid, request.document_id, ns, index, seg_bytes, seg_mime)
             if index == request.segment_index:
                 requested = (seg_bytes, seg_mime)
         increment_usage(user.uid)
@@ -1770,6 +1853,6 @@ async def podcast_segment_audio(
     # index didn't line up with it) — generate just this one segment.
     audio_bytes, mime = await gemini_tts(text, request.speaker)
     if has_cache_key:
-        save_segment_audio(user.uid, request.document_id, request.segment_index, audio_bytes, mime)
+        save_segment_audio(user.uid, request.document_id, ns, request.segment_index, audio_bytes, mime)
     increment_usage(user.uid)
     return Response(content=audio_bytes, media_type=mime)
