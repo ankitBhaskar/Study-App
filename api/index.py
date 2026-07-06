@@ -58,10 +58,19 @@ GEMINI_TTS_MODEL = os.getenv("GEMINI_TTS_MODEL", "gemini-2.5-flash-preview-tts")
 # docs (Kore, Puck, Charon, Fenrir, Aoede, Leda, Orus, Zephyr, …).
 GEMINI_TTS_VOICE_A = os.getenv("GEMINI_TTS_VOICE_A", "Kore")
 GEMINI_TTS_VOICE_B = os.getenv("GEMINI_TTS_VOICE_B", "Puck")
-# Firestore caps a document at 1 MiB. ElevenLabs MP3 segments fit easily;
-# Gemini TTS returns uncompressed PCM (wrapped as WAV) which can exceed that
-# for a long line, so a segment above this raw-bytes threshold is served but
-# not cached (base64 inflates ~4/3, leaving headroom under the 1 MiB cap).
+# Synthesizing a multi-segment batch produces minutes of audio and takes far
+# longer than a text completion, so TTS gets its own timeout instead of
+# GEMINI_TIMEOUT_SECONDS. Must stay under vercel.json's maxDuration.
+GEMINI_TTS_TIMEOUT_SECONDS = float(os.getenv("GEMINI_TTS_TIMEOUT_SECONDS", "280"))
+# A full 4,500-char script is ~5 minutes of audio — too long to synthesize
+# inside one serverless request. Consecutive segments are grouped into
+# batches of at most this many spoken characters and each batch is one
+# Gemini call, so a max-length script needs 2 calls (still within the free
+# tier's 3 requests/minute) and each call finishes well inside maxDuration.
+GEMINI_TTS_BATCH_CHARS = int(os.getenv("GEMINI_TTS_BATCH_CHARS", "2250"))
+# Firestore caps a document at 1 MiB. Cached audio larger than this raw-byte
+# threshold is split across sibling chunk documents (base64 inflates ~4/3,
+# so this leaves headroom under the cap per document).
 MAX_CACHED_AUDIO_BYTES = 740_000
 MAX_SEGMENT_TEXT_CHARS = 1_000
 # Keeps each episode's total spoken text (all segment lines combined) short
@@ -430,6 +439,20 @@ def _audio_segment_ref(db, uid: str, doc_id: str, segment_index: int):
     )
 
 
+def _audio_chunk_ref(db, uid: str, doc_id: str, segment_index: int, chunk: int):
+    # Overflow chunks live as sibling documents with a non-integer ID, so
+    # list_cached_segment_indices (which int()s document IDs) skips them and
+    # the collection-wide delete loops still clean them up.
+    return (
+        db.collection("users")
+        .document(uid)
+        .collection("documents")
+        .document(doc_id)
+        .collection("audio")
+        .document(f"{segment_index}.c{chunk}")
+    )
+
+
 def get_cached_segment_audio(uid: str, doc_id: str, segment_index: int) -> tuple[bytes, str] | None:
     db = get_firestore_client()
     if db is None:
@@ -441,25 +464,44 @@ def get_cached_segment_audio(uid: str, doc_id: str, segment_index: int) -> tuple
     encoded = data.get("data")
     if not encoded:
         return None
+    parts = [base64.b64decode(encoded)]
+    # Segments larger than one Firestore document are stored as extra chunk
+    # documents; docs written before chunking existed have no "chunks" field.
+    for chunk in range(1, int(data.get("chunks") or 1)):
+        chunk_snapshot = _audio_chunk_ref(db, uid, doc_id, segment_index, chunk).get()
+        chunk_data = (chunk_snapshot.to_dict() or {}) if chunk_snapshot.exists else {}
+        chunk_encoded = chunk_data.get("data")
+        if not chunk_encoded:
+            return None  # incomplete cache entry — treat as a miss
+        parts.append(base64.b64decode(chunk_encoded))
     # Older cached segments predate the stored mime field; they were all
     # ElevenLabs MP3s, so default to audio/mpeg.
-    return base64.b64decode(encoded), data.get("mime", "audio/mpeg")
+    return b"".join(parts), data.get("mime", "audio/mpeg")
 
 
 def save_segment_audio(uid: str, doc_id: str, segment_index: int, audio_bytes: bytes, mime: str) -> None:
     db = get_firestore_client()
     if db is None:
         return
-    # Uncompressed Gemini WAV can exceed Firestore's 1 MiB document cap for a
-    # long line; skip caching those (they're still served, just regenerated
-    # next time) rather than failing the write.
-    if len(audio_bytes) > MAX_CACHED_AUDIO_BYTES:
-        return
     # A separate document per segment (rather than a field on the parent
-    # document) keeps each one well under Firestore's 1 MiB cap regardless
-    # of how large the stored extracted text on the parent already is.
+    # document) keeps each one under Firestore's 1 MiB cap; audio larger
+    # than one document allows is split across sibling chunk documents.
+    chunks = [
+        audio_bytes[offset : offset + MAX_CACHED_AUDIO_BYTES]
+        for offset in range(0, len(audio_bytes), MAX_CACHED_AUDIO_BYTES)
+    ] or [b""]
+    # Extra chunks go in first so a reader never sees the main document
+    # pointing at chunks that don't exist yet.
+    for chunk_index, chunk_bytes in enumerate(chunks[1:], start=1):
+        _audio_chunk_ref(db, uid, doc_id, segment_index, chunk_index).set(
+            {"data": base64.b64encode(chunk_bytes).decode("ascii")}
+        )
     _audio_segment_ref(db, uid, doc_id, segment_index).set(
-        {"data": base64.b64encode(audio_bytes).decode("ascii"), "mime": mime}
+        {
+            "data": base64.b64encode(chunks[0]).decode("ascii"),
+            "mime": mime,
+            "chunks": len(chunks),
+        }
     )
 
 
@@ -1506,7 +1548,7 @@ async def gemini_tts(text: str, speaker: int) -> tuple[bytes, str]:
         },
     }
 
-    async with httpx.AsyncClient(timeout=GEMINI_TIMEOUT_SECONDS) as client:
+    async with httpx.AsyncClient(timeout=GEMINI_TTS_TIMEOUT_SECONDS) as client:
         try:
             response = await client.post(url, headers={"x-goog-api-key": api_key}, json=body)
         except httpx.HTTPError as exc:
@@ -1558,14 +1600,39 @@ def _split_pcm_by_chars(pcm: bytes, char_counts: list[int], bits: int = 16) -> l
     return chunks
 
 
-async def gemini_tts_episode(transcript: list[dict[str, Any]], hosts: list[str]) -> list[tuple[bytes, str]]:
-    """Generate audio for a WHOLE podcast episode in a single Gemini call
-    (using multi-speaker TTS when there are two hosts), then slice the
-    combined PCM into per-segment WAV clips. This replaces calling
-    gemini_tts() once per segment — up to a dozen calls for one episode —
-    with exactly one call regardless of segment count, which is both far
-    cheaper against the free-tier rate limit and less likely to hit a
-    transient Gemini error."""
+def _tts_batch_bounds(transcript: list[dict[str, Any]], segment_index: int) -> tuple[int, int]:
+    """Group consecutive segments into batches of at most
+    GEMINI_TTS_BATCH_CHARS spoken characters and return the [start, end)
+    bounds of the batch containing segment_index. Batching exists because a
+    full 4,500-char script is ~5 minutes of audio — one Gemini call for all
+    of it outlives the serverless request window (observed as 504s in
+    production) — while per-segment calls trip the free tier's
+    3-requests/minute limit. A batch is the middle ground: at most 2 calls
+    for a max-length script, each finishing well inside maxDuration."""
+    start = 0
+    batch_chars = 0
+    for index, seg in enumerate(transcript):
+        line_chars = max(len(str(seg.get("line") or "")), 1)
+        if batch_chars and batch_chars + line_chars > GEMINI_TTS_BATCH_CHARS:
+            if index > segment_index:
+                return start, index
+            start = index
+            batch_chars = 0
+        batch_chars += line_chars
+    return start, len(transcript)
+
+
+async def gemini_tts_batch(
+    transcript: list[dict[str, Any]], hosts: list[str], segment_index: int
+) -> list[tuple[int, bytes, str]]:
+    """Generate audio for the batch of consecutive segments containing
+    segment_index in a single Gemini call (using multi-speaker TTS when
+    there are two hosts), then slice the combined PCM into per-segment WAV
+    clips. Returns (absolute_segment_index, wav_bytes, mime) tuples. This
+    replaces calling gemini_tts() once per segment — up to a dozen calls
+    for one episode — with one call per ~GEMINI_TTS_BATCH_CHARS characters,
+    which stays under both the free-tier rate limit and the serverless
+    request deadline."""
     api_key = get_gemini_api_key()
     if not api_key:
         raise HTTPException(
@@ -1581,10 +1648,12 @@ async def gemini_tts_episode(transcript: list[dict[str, Any]], hosts: list[str])
     if host_b == host_a:
         host_b = f"{host_a} 2"
 
-    lines = [str(seg.get("line") or "") for seg in transcript]
+    batch_start, batch_end = _tts_batch_bounds(transcript, segment_index)
+    batch = transcript[batch_start:batch_end]
+    lines = [str(seg.get("line") or "") for seg in batch]
     # Match the frontend's own speaker-index mapping (seg.who === hosts[0] ?
     # 0 : 1) so cached audio lines up with which voice the UI expects.
-    labels = [host_a if str(seg.get("who")) == (hosts[0] if hosts else host_a) else host_b for seg in transcript]
+    labels = [host_a if str(seg.get("who")) == (hosts[0] if hosts else host_a) else host_b for seg in batch]
     speaker_count = len(set(labels))
 
     combined_text = "\n".join(f"{label}: {line}" for label, line in zip(labels, lines))
@@ -1606,7 +1675,7 @@ async def gemini_tts_episode(transcript: list[dict[str, Any]], hosts: list[str])
     url = f"{GEMINI_API_BASE}/models/{GEMINI_TTS_MODEL}:generateContent"
     body = {"contents": [{"parts": [{"text": combined_text}]}], "generationConfig": generation_config}
 
-    async with httpx.AsyncClient(timeout=GEMINI_TIMEOUT_SECONDS) as client:
+    async with httpx.AsyncClient(timeout=GEMINI_TTS_TIMEOUT_SECONDS) as client:
         try:
             response = await client.post(url, headers={"x-goog-api-key": api_key}, json=body)
         except httpx.HTTPError as exc:
@@ -1633,7 +1702,10 @@ async def gemini_tts_episode(transcript: list[dict[str, Any]], hosts: list[str])
 
     char_counts = [max(len(line), 1) for line in lines]
     pcm_chunks = _split_pcm_by_chars(pcm, char_counts)
-    return [(pcm_to_wav(chunk, sample_rate), "audio/wav") for chunk in pcm_chunks]
+    return [
+        (batch_start + offset, pcm_to_wav(chunk, sample_rate), "audio/wav")
+        for offset, chunk in enumerate(pcm_chunks)
+    ]
 
 
 @app.post("/api/podcast/segment-audio")
@@ -1665,9 +1737,9 @@ async def podcast_segment_audio(
         return Response(content=audio_bytes, media_type=mime)
 
     # Gemini path: when the request is tied to a saved document, generate
-    # the whole episode's audio in ONE Gemini call and cache every segment
-    # from it at once, instead of one call per segment.
-    episode_result: list[tuple[bytes, str]] | None = None
+    # the whole batch of segments around the requested one in ONE Gemini
+    # call and cache all of them at once, instead of one call per segment.
+    batch_result: list[tuple[int, bytes, str]] | None = None
     if has_cache_key:
         db = get_firestore_client()
         doc_snapshot = (
@@ -1680,13 +1752,18 @@ async def podcast_segment_audio(
         transcript = podcast_data.get("transcript") or []
         hosts = podcast_data.get("hosts") or []
         if transcript and request.segment_index < len(transcript):
-            episode_result = await gemini_tts_episode(transcript, hosts)
+            batch_result = await gemini_tts_batch(transcript, hosts, request.segment_index)
 
-    if episode_result is not None:
-        for index, (seg_bytes, seg_mime) in enumerate(episode_result):
+    if batch_result is not None:
+        requested: tuple[bytes, str] | None = None
+        for index, seg_bytes, seg_mime in batch_result:
             save_segment_audio(user.uid, request.document_id, index, seg_bytes, seg_mime)
+            if index == request.segment_index:
+                requested = (seg_bytes, seg_mime)
         increment_usage(user.uid)
-        audio_bytes, mime = episode_result[request.segment_index]
+        if requested is None:
+            raise HTTPException(status_code=502, detail="Audio generation did not cover the requested segment.")
+        audio_bytes, mime = requested
         return Response(content=audio_bytes, media_type=mime)
 
     # Fallback: no saved document to read the full script from (or the
