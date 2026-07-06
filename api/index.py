@@ -64,6 +64,12 @@ GEMINI_TTS_VOICE_B = os.getenv("GEMINI_TTS_VOICE_B", "Puck")
 # not cached (base64 inflates ~4/3, leaving headroom under the 1 MiB cap).
 MAX_CACHED_AUDIO_BYTES = 740_000
 MAX_SEGMENT_TEXT_CHARS = 1_000
+# Keeps each episode's total spoken text (all segment lines combined) short
+# enough to stay cheap and fast to synthesize regardless of TTS provider.
+# Enforced both in the prompt (so Gemini writes a shorter script) and in
+# parse_podcast_script() (so a script that ignores the prompt still gets
+# capped rather than trusted as-is).
+MAX_PODCAST_SCRIPT_CHARS = 4_500
 # Bound the persisted tutor transcript so it can't grow past Firestore's
 # 1 MiB document cap: keep the most recent messages, each text truncated.
 MAX_STORED_CHAT_MESSAGES = 60
@@ -824,6 +830,7 @@ Create study material and return a single JSON object with EXACTLY this shape (n
 }}
 Summary instructions: {summary_line}
 Podcast instructions: {podcast_line} Create 8 to 12 podcast segments with timestamps spread between 0:00 and 9:30 in mm:ss format.
+Keep the combined spoken text of all podcast segments under {MAX_PODCAST_SCRIPT_CHARS} characters total — write shorter, punchier lines rather than fewer segments.
 Create 3 to 5 quiz questions. Everything must be grounded in the document content."""
 
 
@@ -848,7 +855,8 @@ Generate a fresh podcast script grounded in the document. Return a single JSON o
     {{"timestamp": "0:00", "speaker": "name", "line": "spoken line"}}
   ]
 }}
-{podcast_line} Create 8 to 12 segments with timestamps spread between 0:00 and 9:30 in mm:ss format. Everything must be grounded in the document content."""
+{podcast_line} Create 8 to 12 segments with timestamps spread between 0:00 and 9:30 in mm:ss format. Everything must be grounded in the document content.
+Keep the combined spoken text of all segments under {MAX_PODCAST_SCRIPT_CHARS} characters total — write shorter, punchier lines rather than fewer segments."""
 
 
 QUIZ_SYSTEM_INSTRUCTION = """You are an expert study assistant. Use ONLY the uploaded document content provided by the user.
@@ -903,16 +911,30 @@ def parse_summary_points(summary_raw: Any) -> list[str]:
 def parse_podcast_script(podcast_raw: dict[str, Any]) -> Podcast | None:
     hosts = [str(host) for host in podcast_raw.get("hosts") or []] or ["Maya", "Theo"]
     segments: list[PodcastSegment] = []
+    # The prompt asks Gemini to stay under MAX_PODCAST_SCRIPT_CHARS, but LLMs
+    # don't reliably self-count characters, so enforce it here too: stop
+    # adding segments once the combined spoken text would cross the cap,
+    # truncating (rather than dropping) an over-long segment so one runaway
+    # line can't zero out an otherwise-good script.
+    total_chars = 0
     for seg in podcast_raw.get("segments") or []:
         if not isinstance(seg, dict):
             continue
         line = str(seg.get("line") or "").strip()
         if not line:
             continue
+        remaining = MAX_PODCAST_SCRIPT_CHARS - total_chars
+        if remaining <= 0:
+            break
+        if len(line) > remaining:
+            line = line[:remaining].rstrip()
+            if not line:
+                break
         timestamp = str(seg.get("timestamp") or seg.get("t") or "0:00")
         if not re.fullmatch(r"\d{1,2}:\d{2}", timestamp):
             timestamp = "0:00"
         segments.append(PodcastSegment(t=timestamp, who=str(seg.get("speaker") or seg.get("who") or hosts[0]), line=line))
+        total_chars += len(line)
     if not segments:
         return None
 
