@@ -48,11 +48,25 @@ ELEVENLABS_MODEL = os.getenv("ELEVENLABS_MODEL", "eleven_multilingual_v2")
 ELEVENLABS_VOICE_HOST_A = os.getenv("ELEVENLABS_VOICE_HOST_A")
 ELEVENLABS_VOICE_HOST_B = os.getenv("ELEVENLABS_VOICE_HOST_B")
 ELEVENLABS_TIMEOUT_SECONDS = 55.0
-# Which text-to-speech backend the podcast audio uses. Gemini TTS is far
-# cheaper than ElevenLabs, so it's the default; set TTS_PROVIDER=elevenlabs
-# to switch back (the ElevenLabs code path is kept intact, just not used
-# unless selected). Gemini TTS reuses GEMINI_API_KEY.
-TTS_PROVIDER = os.getenv("TTS_PROVIDER", "gemini").strip().lower()
+# Which text-to-speech backend the podcast audio uses: "google" (Cloud
+# Text-to-Speech, default — synthesizes a whole 4,500-char episode in ONE
+# fast call), "gemini" (Gemini TTS, slower LLM-based synthesis in batches)
+# or "elevenlabs". All three code paths are kept intact; only the selected
+# one runs.
+TTS_PROVIDER = os.getenv("TTS_PROVIDER", "google").strip().lower()
+# Google Cloud Text-to-Speech (texttospeech.googleapis.com). Needs the
+# Cloud TTS API enabled on the key's Google Cloud project; the key falls
+# back to GEMINI_API_KEY when GOOGLE_TTS_API_KEY isn't set. WaveNet voices
+# cost $4/1M chars with a 1M-chars/month free tier. One voice narrates the
+# whole episode (WaveNet has no multi-speaker mode).
+GOOGLE_TTS_API_BASE = os.getenv("GOOGLE_TTS_API_BASE", "https://texttospeech.googleapis.com/v1")
+GOOGLE_TTS_VOICE = os.getenv("GOOGLE_TTS_VOICE", "en-AU-Wavenet-D")
+GOOGLE_TTS_TIMEOUT_SECONDS = float(os.getenv("GOOGLE_TTS_TIMEOUT_SECONDS", "55"))
+# Cloud TTS rejects requests over 5,000 input bytes; scripts are capped at
+# 4,500 chars but multi-byte punctuation could push past, so episodes are
+# packed into as few synthesize calls as fit under this byte budget
+# (normally exactly one).
+GOOGLE_TTS_MAX_INPUT_BYTES = 4_800
 GEMINI_TTS_MODEL = os.getenv("GEMINI_TTS_MODEL", "gemini-2.5-flash-preview-tts")
 # Two prebuilt Gemini voices for the two hosts. Full list in Gemini's TTS
 # docs (Kore, Puck, Charon, Fenrir, Aoede, Leda, Orus, Zephyr, …).
@@ -311,6 +325,12 @@ class DocumentListResponse(BaseModel):
 
 def get_gemini_api_key() -> str | None:
     return os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+
+
+def get_google_tts_api_key() -> str | None:
+    # Cloud TTS accepts plain API keys; a dedicated key can be set, but the
+    # Gemini key works too once the Cloud TTS API is enabled on its project.
+    return os.getenv("GOOGLE_TTS_API_KEY") or get_gemini_api_key()
 
 
 def get_elevenlabs_api_key() -> str | None:
@@ -1677,6 +1697,111 @@ def _split_pcm_by_chars(pcm: bytes, char_counts: list[int], bits: int = 16) -> l
     return chunks
 
 
+def _parse_wav(wav: bytes) -> tuple[bytes, int]:
+    """Extract (pcm, sample_rate) from a WAV container. Cloud TTS LINEAR16
+    responses come with a WAV header; the PCM inside gets re-sliced per
+    segment and re-wrapped by pcm_to_wav()."""
+    if len(wav) < 44 or wav[:4] != b"RIFF" or wav[8:12] != b"WAVE":
+        raise HTTPException(status_code=502, detail="Google TTS returned audio in an unexpected format.")
+    sample_rate = struct.unpack_from("<I", wav, 24)[0] or 24000
+    data_pos = wav.find(b"data", 12)
+    if data_pos == -1:
+        raise HTTPException(status_code=502, detail="Google TTS returned audio in an unexpected format.")
+    data_len = struct.unpack_from("<I", wav, data_pos + 4)[0]
+    start = data_pos + 8
+    return wav[start : start + data_len] if data_len else wav[start:], sample_rate
+
+
+async def _google_tts_synthesize(text: str) -> tuple[bytes, int]:
+    """One Cloud Text-to-Speech synthesize call. Returns (pcm, sample_rate).
+    Unlike Gemini TTS this is a dedicated speech engine, not an LLM — a full
+    4,500-char script synthesizes in seconds, so a whole episode fits in one
+    call without ever nearing the serverless deadline."""
+    api_key = get_google_tts_api_key()
+    if not api_key:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Google TTS API key is not configured. Set GOOGLE_TTS_API_KEY (or GEMINI_API_KEY) in your "
+                "Vercel project settings and redeploy."
+            ),
+        )
+
+    # "en-AU-Wavenet-D" → languageCode "en-AU"
+    language_code = "-".join(GOOGLE_TTS_VOICE.split("-")[:2]) or "en-AU"
+    body = {
+        "input": {"text": text},
+        "voice": {"languageCode": language_code, "name": GOOGLE_TTS_VOICE},
+        "audioConfig": {"audioEncoding": "LINEAR16", "sampleRateHertz": 24000},
+    }
+
+    async with httpx.AsyncClient(timeout=GOOGLE_TTS_TIMEOUT_SECONDS) as client:
+        try:
+            response = await client.post(
+                f"{GOOGLE_TTS_API_BASE}/text:synthesize",
+                headers={"x-goog-api-key": api_key},
+                json=body,
+            )
+        except httpx.HTTPError as exc:
+            raise HTTPException(status_code=502, detail=f"Could not reach the Google TTS API: {exc}") from exc
+
+    if response.status_code != 200:
+        try:
+            message = response.json()["error"]["message"]
+        except Exception:
+            message = response.text[:500]
+        if response.status_code == 403 and "texttospeech.googleapis.com" in message:
+            message += (
+                " — enable the Cloud Text-to-Speech API for this key's Google Cloud project at "
+                "https://console.cloud.google.com/apis/library/texttospeech.googleapis.com"
+            )
+        raise HTTPException(status_code=502, detail=f"Google TTS error ({response.status_code}): {message}")
+
+    try:
+        wav = base64.b64decode(response.json()["audioContent"])
+    except (KeyError, TypeError, ValueError):
+        raise HTTPException(status_code=502, detail="Google TTS returned an unexpected response shape.")
+    return _parse_wav(wav)
+
+
+async def google_tts(text: str) -> tuple[bytes, str]:
+    """Generate one ad-hoc segment via Cloud TTS. Returns (wav_bytes, mime)."""
+    pcm, sample_rate = await _google_tts_synthesize(text)
+    return pcm_to_wav(pcm, sample_rate), "audio/wav"
+
+
+async def google_tts_episode(transcript: list[dict[str, Any]]) -> list[tuple[int, bytes, str]]:
+    """Generate the WHOLE episode via Cloud TTS — normally in exactly one
+    synthesize call (the 4,500-char script cap sits under the API's 5,000
+    input-byte limit), split into per-segment WAV clips for the existing
+    player/cache. Only multi-byte punctuation pushing the script past the
+    byte budget forces a second call. One WaveNet voice narrates every
+    segment; WaveNet has no multi-speaker mode."""
+    lines = [str(seg.get("line") or "") for seg in transcript]
+
+    # Pack whole segments into as few calls as fit the input-byte budget.
+    slices: list[tuple[int, int]] = []
+    start = 0
+    size = 0
+    for index, line in enumerate(lines):
+        line_bytes = len(line.encode("utf-8")) + 2  # +2 for the "\n\n" joiner
+        if size and size + line_bytes > GOOGLE_TTS_MAX_INPUT_BYTES:
+            slices.append((start, index))
+            start = index
+            size = 0
+        size += line_bytes
+    slices.append((start, len(lines)))
+
+    results: list[tuple[int, bytes, str]] = []
+    for slice_start, slice_end in slices:
+        text = "\n\n".join(lines[slice_start:slice_end])
+        pcm, sample_rate = await _google_tts_synthesize(text)
+        char_counts = [max(len(line), 1) for line in lines[slice_start:slice_end]]
+        for offset, chunk in enumerate(_split_pcm_by_chars(pcm, char_counts)):
+            results.append((slice_start + offset, pcm_to_wav(chunk, sample_rate), "audio/wav"))
+    return results
+
+
 def _tts_batch_bounds(transcript: list[dict[str, Any]], segment_index: int) -> tuple[int, int]:
     """Group consecutive segments into batches of at most
     GEMINI_TTS_BATCH_CHARS spoken characters and return the [start, end)
@@ -1817,8 +1942,8 @@ async def podcast_segment_audio(
     if len(text) > MAX_SEGMENT_TEXT_CHARS:
         raise HTTPException(status_code=400, detail="Segment text is too long for audio generation.")
 
-    # Gemini TTS is the cheaper default; ElevenLabs stays available via
-    # TTS_PROVIDER=elevenlabs.
+    # Provider dispatch — all three code paths are kept; TTS_PROVIDER picks
+    # one. ElevenLabs stays one call per segment (no batch mode there).
     if TTS_PROVIDER == "elevenlabs":
         audio_bytes, mime = await elevenlabs_tts(text, request.speaker)
         if has_cache_key:
@@ -1826,20 +1951,24 @@ async def podcast_segment_audio(
         increment_usage(user.uid)
         return Response(content=audio_bytes, media_type=mime)
 
-    # Gemini path: when the request is tied to a saved document, generate
-    # the whole batch of segments around the requested one in ONE Gemini
-    # call and cache all of them at once, instead of one call per segment.
-    batch_result: list[tuple[int, bytes, str]] | None = None
+    # For a request tied to a saved document, generate many segments at once
+    # from the stored transcript and cache them all:
+    #   google (default): the ENTIRE episode in one fast Cloud TTS call
+    #   gemini: the batch of ~2,250 chars around the requested segment
+    episode_result: list[tuple[int, bytes, str]] | None = None
     if has_cache_key:
         podcast_data = (doc_data or {}).get("podcast") or {}
         transcript = podcast_data.get("transcript") or []
         hosts = podcast_data.get("hosts") or []
         if transcript and request.segment_index < len(transcript):
-            batch_result = await gemini_tts_batch(transcript, hosts, request.segment_index)
+            if TTS_PROVIDER == "gemini":
+                episode_result = await gemini_tts_batch(transcript, hosts, request.segment_index)
+            else:
+                episode_result = await google_tts_episode(transcript)
 
-    if batch_result is not None:
+    if episode_result is not None:
         requested: tuple[bytes, str] | None = None
-        for index, seg_bytes, seg_mime in batch_result:
+        for index, seg_bytes, seg_mime in episode_result:
             save_segment_audio(user.uid, request.document_id, ns, index, seg_bytes, seg_mime)
             if index == request.segment_index:
                 requested = (seg_bytes, seg_mime)
@@ -1851,7 +1980,10 @@ async def podcast_segment_audio(
 
     # Fallback: no saved document to read the full script from (or the
     # index didn't line up with it) — generate just this one segment.
-    audio_bytes, mime = await gemini_tts(text, request.speaker)
+    if TTS_PROVIDER == "gemini":
+        audio_bytes, mime = await gemini_tts(text, request.speaker)
+    else:
+        audio_bytes, mime = await google_tts(text)
     if has_cache_key:
         save_segment_audio(user.uid, request.document_id, ns, request.segment_index, audio_bytes, mime)
     increment_usage(user.uid)
