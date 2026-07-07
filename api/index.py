@@ -288,6 +288,13 @@ class SegmentAudioRequest(BaseModel):
 
 class AudioStatusResponse(BaseModel):
     cached_segments: list[int]
+    # True when the active style has a single continuous whole-episode track
+    # cached (the "full" sentinel document) — the preferred playback form.
+    episode_cached: bool = False
+
+
+class EpisodeAudioRequest(BaseModel):
+    document_id: str
 
 
 class AuthedUser(BaseModel):
@@ -460,10 +467,14 @@ def truncate_utf8(text: str, max_bytes: int) -> str:
     return encoded[:max_bytes].decode("utf-8", errors="ignore")
 
 
-def _audio_doc_id(ns: str, segment_index: int) -> str:
+def _audio_doc_id(ns: str, segment_index: int | str) -> str:
     # Cached audio is namespaced per podcast style so switching styles keeps
     # every generated version's audio. "legacy" is the namespace of audio
     # cached before styles were versioned: plain integer document IDs.
+    # segment_index is an int for per-segment clips or the sentinel "full"
+    # for the single continuous whole-episode track; "full" never parses as
+    # an int, so segment listings skip it and the namespace-prefix delete on
+    # fresh regeneration still clears it.
     return str(segment_index) if ns == "legacy" else f"{ns}.{segment_index}"
 
 
@@ -477,11 +488,11 @@ def _audio_collection_ref(db, uid: str, doc_id: str):
     )
 
 
-def _audio_segment_ref(db, uid: str, doc_id: str, ns: str, segment_index: int):
+def _audio_segment_ref(db, uid: str, doc_id: str, ns: str, segment_index: int | str):
     return _audio_collection_ref(db, uid, doc_id).document(_audio_doc_id(ns, segment_index))
 
 
-def _audio_chunk_ref(db, uid: str, doc_id: str, ns: str, segment_index: int, chunk: int):
+def _audio_chunk_ref(db, uid: str, doc_id: str, ns: str, segment_index: int | str, chunk: int):
     # Overflow chunks live as sibling documents whose IDs never parse as a
     # segment (their suffix isn't an integer), so list_cached_segment_indices
     # skips them and the collection-wide delete loops still clean them up.
@@ -499,7 +510,7 @@ def _active_audio_ns(data: dict[str, Any]) -> str:
     return "legacy"
 
 
-def get_cached_segment_audio(uid: str, doc_id: str, ns: str, segment_index: int) -> tuple[bytes, str] | None:
+def get_cached_segment_audio(uid: str, doc_id: str, ns: str, segment_index: int | str) -> tuple[bytes, str] | None:
     db = get_firestore_client()
     if db is None:
         return None
@@ -525,7 +536,7 @@ def get_cached_segment_audio(uid: str, doc_id: str, ns: str, segment_index: int)
     return b"".join(parts), data.get("mime", "audio/mpeg")
 
 
-def save_segment_audio(uid: str, doc_id: str, ns: str, segment_index: int, audio_bytes: bytes, mime: str) -> None:
+def save_segment_audio(uid: str, doc_id: str, ns: str, segment_index: int | str, audio_bytes: bytes, mime: str) -> None:
     db = get_firestore_client()
     if db is None:
         return
@@ -1560,7 +1571,16 @@ async def podcast_audio_status(
         snapshot = db.collection("users").document(user.uid).collection("documents").document(doc_id).get()
         if snapshot.exists:
             ns = _active_audio_ns(snapshot.to_dict() or {})
-    return AudioStatusResponse(cached_segments=list_cached_segment_indices(user.uid, doc_id, ns))
+    episode_cached = False
+    if db is not None:
+        # Field-mask read: answers "is the full-episode track cached?"
+        # without downloading megabytes of base64 audio.
+        full_snapshot = _audio_segment_ref(db, user.uid, doc_id, ns, "full").get(field_paths=["chunks"])
+        episode_cached = full_snapshot.exists
+    return AudioStatusResponse(
+        cached_segments=list_cached_segment_indices(user.uid, doc_id, ns),
+        episode_cached=episode_cached,
+    )
 
 
 def pcm_to_wav(pcm: bytes, sample_rate: int, channels: int = 1, bits: int = 16) -> bytes:
@@ -1712,11 +1732,11 @@ def _parse_wav(wav: bytes) -> tuple[bytes, int]:
     return wav[start : start + data_len] if data_len else wav[start:], sample_rate
 
 
-async def _google_tts_synthesize(text: str) -> tuple[bytes, int]:
-    """One Cloud Text-to-Speech synthesize call. Returns (pcm, sample_rate).
-    Unlike Gemini TTS this is a dedicated speech engine, not an LLM — a full
-    4,500-char script synthesizes in seconds, so a whole episode fits in one
-    call without ever nearing the serverless deadline."""
+async def _google_tts_request(text: str, audio_config: dict[str, Any]) -> bytes:
+    """One Cloud Text-to-Speech synthesize call; returns the decoded audio
+    bytes. Unlike Gemini TTS this is a dedicated speech engine, not an LLM —
+    a full 4,500-char script synthesizes in seconds, so a whole episode fits
+    in one call without ever nearing the serverless deadline."""
     api_key = get_google_tts_api_key()
     if not api_key:
         raise HTTPException(
@@ -1732,7 +1752,7 @@ async def _google_tts_synthesize(text: str) -> tuple[bytes, int]:
     body = {
         "input": {"text": text},
         "voice": {"languageCode": language_code, "name": GOOGLE_TTS_VOICE},
-        "audioConfig": {"audioEncoding": "LINEAR16", "sampleRateHertz": 24000},
+        "audioConfig": audio_config,
     }
 
     async with httpx.AsyncClient(timeout=GOOGLE_TTS_TIMEOUT_SECONDS) as client:
@@ -1758,28 +1778,21 @@ async def _google_tts_synthesize(text: str) -> tuple[bytes, int]:
         raise HTTPException(status_code=502, detail=f"Google TTS error ({response.status_code}): {message}")
 
     try:
-        wav = base64.b64decode(response.json()["audioContent"])
+        return base64.b64decode(response.json()["audioContent"])
     except (KeyError, TypeError, ValueError):
         raise HTTPException(status_code=502, detail="Google TTS returned an unexpected response shape.")
+
+
+async def _google_tts_synthesize(text: str) -> tuple[bytes, int]:
+    """LINEAR16 synthesize call. Returns (pcm, sample_rate)."""
+    wav = await _google_tts_request(text, {"audioEncoding": "LINEAR16", "sampleRateHertz": 24000})
     return _parse_wav(wav)
 
 
-async def google_tts(text: str) -> tuple[bytes, str]:
-    """Generate one ad-hoc segment via Cloud TTS. Returns (wav_bytes, mime)."""
-    pcm, sample_rate = await _google_tts_synthesize(text)
-    return pcm_to_wav(pcm, sample_rate), "audio/wav"
-
-
-async def google_tts_episode(transcript: list[dict[str, Any]]) -> list[tuple[int, bytes, str]]:
-    """Generate the WHOLE episode via Cloud TTS — normally in exactly one
-    synthesize call (the 4,500-char script cap sits under the API's 5,000
-    input-byte limit), split into per-segment WAV clips for the existing
-    player/cache. Only multi-byte punctuation pushing the script past the
-    byte budget forces a second call. One WaveNet voice narrates every
-    segment; WaveNet has no multi-speaker mode."""
-    lines = [str(seg.get("line") or "") for seg in transcript]
-
-    # Pack whole segments into as few calls as fit the input-byte budget.
+def _episode_text_slices(lines: list[str]) -> list[tuple[int, int]]:
+    """Pack whole segments into as few synthesize calls as fit Cloud TTS's
+    input-byte limit — normally exactly one for a ≤4,500-char script; only
+    multi-byte punctuation pushing past the budget forces a second."""
     slices: list[tuple[int, int]] = []
     start = 0
     size = 0
@@ -1791,9 +1804,40 @@ async def google_tts_episode(transcript: list[dict[str, Any]]) -> list[tuple[int
             size = 0
         size += line_bytes
     slices.append((start, len(lines)))
+    return slices
 
+
+async def google_tts_episode_track(transcript: list[dict[str, Any]]) -> bytes:
+    """Generate the WHOLE episode as ONE continuous MP3 track. MP3 keeps a
+    5-minute episode around ~1.2 MB — inside Vercel's response-body limit,
+    unlike a ~14 MB uncompressed WAV. In the rare multi-slice case the MP3
+    parts are concatenated (same encoder/settings, so players read the
+    frames straight through). One WaveNet voice narrates everything."""
+    lines = [str(seg.get("line") or "") for seg in transcript]
+    parts: list[bytes] = []
+    for slice_start, slice_end in _episode_text_slices(lines):
+        text = "\n\n".join(lines[slice_start:slice_end])
+        parts.append(
+            await _google_tts_request(text, {"audioEncoding": "MP3", "sampleRateHertz": 24000})
+        )
+    return b"".join(parts)
+
+
+async def google_tts(text: str) -> tuple[bytes, str]:
+    """Generate one ad-hoc segment via Cloud TTS. Returns (wav_bytes, mime)."""
+    pcm, sample_rate = await _google_tts_synthesize(text)
+    return pcm_to_wav(pcm, sample_rate), "audio/wav"
+
+
+async def google_tts_episode(transcript: list[dict[str, Any]]) -> list[tuple[int, bytes, str]]:
+    """Generate the WHOLE episode via Cloud TTS — normally in exactly one
+    synthesize call — split into per-segment WAV clips for the per-segment
+    player/cache (used when a client asks for individual segments). One
+    WaveNet voice narrates every segment; WaveNet has no multi-speaker
+    mode."""
+    lines = [str(seg.get("line") or "") for seg in transcript]
     results: list[tuple[int, bytes, str]] = []
-    for slice_start, slice_end in slices:
+    for slice_start, slice_end in _episode_text_slices(lines):
         text = "\n\n".join(lines[slice_start:slice_end])
         pcm, sample_rate = await _google_tts_synthesize(text)
         char_counts = [max(len(line), 1) for line in lines[slice_start:slice_end]]
@@ -1988,3 +2032,41 @@ async def podcast_segment_audio(
         save_segment_audio(user.uid, request.document_id, ns, request.segment_index, audio_bytes, mime)
     increment_usage(user.uid)
     return Response(content=audio_bytes, media_type=mime)
+
+
+@app.post("/api/podcast/episode-audio")
+async def podcast_episode_audio(
+    request: EpisodeAudioRequest, user: AuthedUser = Depends(require_user)
+) -> Response:
+    """The whole episode as ONE continuous MP3 track (Google Cloud TTS only).
+    The frontend prefers this over per-segment clips: one request, one audio
+    element, seamless playback with real seeking. Falls back to 404 for the
+    other providers so the caller can use the per-segment flow instead."""
+    if TTS_PROVIDER != "google":
+        raise HTTPException(status_code=404, detail="Episode audio is only available with the Google TTS provider.")
+
+    db = get_firestore_client()
+    doc_snapshot = (
+        db.collection("users").document(user.uid).collection("documents").document(request.document_id).get()
+        if db is not None
+        else None
+    )
+    doc_data = doc_snapshot.to_dict() if doc_snapshot is not None and doc_snapshot.exists else None
+    if doc_data is None:
+        raise HTTPException(status_code=404, detail="Document not found.")
+    ns = _active_audio_ns(doc_data)
+
+    cached = get_cached_segment_audio(user.uid, request.document_id, ns, "full")
+    if cached:
+        audio_bytes, mime = cached
+        return Response(content=audio_bytes, media_type=mime)
+
+    transcript = ((doc_data.get("podcast") or {}).get("transcript")) or []
+    if not transcript:
+        raise HTTPException(status_code=400, detail="This document has no podcast script to narrate.")
+
+    check_usage_limit(user.uid)
+    mp3 = await google_tts_episode_track(transcript)
+    save_segment_audio(user.uid, request.document_id, ns, "full", mp3, "audio/mpeg")
+    increment_usage(user.uid)
+    return Response(content=mp3, media_type="audio/mpeg")

@@ -993,6 +993,11 @@ function PodcastPanel({ doc, documentId, authedFetch }) {
   // generateAudio and lazily (from cache) during playback, so it lives in a
   // ref rather than state — playback reads it without forcing re-renders.
   const urlsRef = useRef([]);
+  // Episode mode: the whole episode is ONE continuous MP3 track (Google
+  // Cloud TTS provider) — a single audio element, real seeking, no gaps.
+  // Per-segment clips remain the fallback for the other TTS providers.
+  const [episodeMode, setEpisodeMode] = useState(false);
+  const episodeUrlRef = useRef(null);
 
   // Free playback via the browser's built-in voices (Web Speech API) — no
   // backend call, no API cost, no quota, so this is always available and
@@ -1068,6 +1073,24 @@ function PodcastPanel({ doc, documentId, authedFetch }) {
   const revokeUrls = () => {
     urlsRef.current.forEach((u) => u && URL.revokeObjectURL(u));
     urlsRef.current = [];
+    if (episodeUrlRef.current) {
+      URL.revokeObjectURL(episodeUrlRef.current);
+      episodeUrlRef.current = null;
+    }
+  };
+
+  // Char-proportional start position (0..1) of each segment inside the
+  // single episode track — used to map playback time to the highlighted
+  // transcript line and taps on a line to a seek position.
+  const segmentFractions = (pod) => {
+    const lengths = pod.transcript.map((seg) => Math.max(seg.line.length, 1));
+    const total = lengths.reduce((a, b) => a + b, 0) || 1;
+    let acc = 0;
+    return lengths.map((len) => {
+      const fraction = acc / total;
+      acc += len;
+      return fraction;
+    });
   };
 
   // Tapping a style chip is the whole flow: generate the new script in that
@@ -1105,6 +1128,7 @@ function PodcastPanel({ doc, documentId, authedFetch }) {
       setPodcast(data.podcast);
       if (data.saved_styles) setSavedStyles(data.saved_styles);
       setScriptBusy(null);
+      setEpisodeMode(false);
       // A reused (saved) version keeps its own audio in storage — if the
       // whole episode is still cached, put the AI player straight back
       // instead of showing the Generate button again.
@@ -1112,6 +1136,13 @@ function PodcastPanel({ doc, documentId, authedFetch }) {
         try {
           const statusRes = await authedFetch(`/api/podcast/audio-status/${documentId}`);
           const status = await statusRes.json().catch(() => null);
+          if (status?.episode_cached) {
+            const url = await ensureEpisodeUrl();
+            startEpisodePlayback(url, data.podcast);
+            setEpisodeMode(true);
+            setAudioState("ready");
+            return;
+          }
           const cached = new Set(status?.cached_segments || []);
           const segments = data.podcast?.transcript || [];
           if (segments.length > 0 && segments.every((_, i) => cached.has(i))) {
@@ -1146,6 +1177,8 @@ function PodcastPanel({ doc, documentId, authedFetch }) {
     setAudioError("");
     setAudioState("idle");
 
+    setEpisodeMode(false);
+
     if (!documentId || transcript.length === 0) return undefined;
 
     (async () => {
@@ -1153,6 +1186,17 @@ function PodcastPanel({ doc, documentId, authedFetch }) {
         const res = await authedFetch(`/api/podcast/audio-status/${documentId}`);
         if (!res.ok) return;
         const data = await res.json();
+        // Preferred: a cached single-track episode — fetch it (free cache
+        // hit) and restore the player straight to ready.
+        if (data.episode_cached) {
+          const url = await ensureEpisodeUrl();
+          if (!cancelled) {
+            startEpisodePlayback(url, podcast);
+            setEpisodeMode(true);
+            setAudioState("ready");
+          }
+          return;
+        }
         const cached = new Set(data.cached_segments || []);
         // Only restore when the whole episode is cached, so playback never
         // stalls partway through on a segment that was never generated.
@@ -1247,22 +1291,117 @@ function PodcastPanel({ doc, documentId, authedFetch }) {
     throw lastErr;
   };
 
+  // Fetch the whole episode as ONE MP3 (Google TTS provider). Throws with
+  // err.status = 404 when the active provider doesn't offer episode tracks.
+  const ensureEpisodeUrl = async () => {
+    if (episodeUrlRef.current) return episodeUrlRef.current;
+    const res = await authedFetch("/api/podcast/episode-audio", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ document_id: documentId }),
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => null);
+      const err = new Error(data?.detail || `The audio service returned an error (${res.status}).`);
+      err.status = res.status;
+      throw err;
+    }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    episodeUrlRef.current = url;
+    return url;
+  };
+
+  const episodeCachedOnServer = async () => {
+    if (!documentId) return false;
+    try {
+      const res = await authedFetch(`/api/podcast/audio-status/${documentId}`);
+      if (!res.ok) return false;
+      const data = await res.json();
+      return data.episode_cached === true;
+    } catch {
+      return false;
+    }
+  };
+
+  // Same idea as fetchSegmentWithRecovery: the server finishes and caches
+  // the track even if our connection drops mid-request, so poll the status
+  // endpoint and re-request as a cache hit before re-generating for real.
+  const fetchEpisodeWithRecovery = async () => {
+    let lastErr;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        return await ensureEpisodeUrl();
+      } catch (err) {
+        lastErr = err;
+        const recoverable = err instanceof TypeError || (err.status && err.status >= 500);
+        if (!recoverable) throw err;
+        for (let poll = 0; poll < 12; poll++) {
+          await new Promise((resolve) => setTimeout(resolve, 5000));
+          if (await episodeCachedOnServer()) break;
+        }
+      }
+    }
+    throw lastErr;
+  };
+
+  // Wire the single episode track into the audio element: overall progress
+  // drives the bar directly, and the highlighted transcript line follows
+  // the char-proportional segment start positions.
+  const startEpisodePlayback = (url, pod, { autoplay } = {}) => {
+    if (!audioRef.current) audioRef.current = new Audio();
+    const a = audioRef.current;
+    const fractions = segmentFractions(pod);
+    a.src = url;
+    a.ontimeupdate = () => {
+      if (!a.duration) return;
+      const pct = a.currentTime / a.duration;
+      setSegProgress(pct);
+      let idx = 0;
+      for (let i = 0; i < fractions.length; i++) if (pct >= fractions[i]) idx = i;
+      setPlayingIdx(idx);
+    };
+    a.onended = () => {
+      setPlaying(false);
+      setPlayingIdx(0);
+      setSegProgress(0);
+    };
+    if (autoplay) {
+      a.play();
+      setPlaying(true);
+    }
+  };
+
   const generateAudioFor = async (pod) => {
     setAudioState("generating");
     setAudioError("");
     setGenProgress(0);
     try {
       urlsRef.current = new Array(pod.transcript.length).fill(null);
-      // Strictly sequential on purpose: on the Gemini path a cache miss
-      // generates and caches a whole BATCH of segments server-side, so two
-      // concurrent misses would each fire an expensive batch call and trip
-      // the free tier's 3-requests/minute limit. Sequential fetching means
-      // each miss pays for its batch once and the segments after it are
-      // instant cache hits. (ElevenLabs just runs one request at a time.)
-      for (let i = 0; i < pod.transcript.length; i++) {
-        await fetchSegmentWithRecovery(i, pod);
-        setGenProgress(i + 1);
+      let isEpisode = false;
+      if (documentId) {
+        // Preferred path: the WHOLE episode as one continuous track in one
+        // request (Google Cloud TTS synthesizes it in seconds). A 404 means
+        // the active provider only supports per-segment clips.
+        try {
+          const url = await fetchEpisodeWithRecovery();
+          startEpisodePlayback(url, pod);
+          isEpisode = true;
+        } catch (err) {
+          if (err.status !== 404) throw err;
+        }
       }
+      if (!isEpisode) {
+        // Per-segment fallback (Gemini / ElevenLabs providers). Strictly
+        // sequential on purpose: a cache miss generates a whole BATCH
+        // server-side, so two concurrent misses would each fire an
+        // expensive call and trip rate limits.
+        for (let i = 0; i < pod.transcript.length; i++) {
+          await fetchSegmentWithRecovery(i, pod);
+          setGenProgress(i + 1);
+        }
+      }
+      setEpisodeMode(isEpisode);
       // The free browser-voice player is hidden once AI audio is ready, so
       // stop any browser speech now — otherwise it would keep talking with
       // its pause button gone.
@@ -1281,7 +1420,29 @@ function PodcastPanel({ doc, documentId, authedFetch }) {
 
   const generateAudio = () => generateAudioFor(podcast);
 
+  // Seek the single episode track to a 0..1 position and play.
+  const seekEpisode = (pct) => {
+    const a = audioRef.current;
+    if (!a || !episodeUrlRef.current) return;
+    const seekWhenReady = () => {
+      a.currentTime = pct * a.duration;
+      a.play();
+      setPlaying(true);
+    };
+    if (a.duration) {
+      seekWhenReady();
+    } else {
+      a.onloadedmetadata = seekWhenReady;
+      if (!a.src) a.src = episodeUrlRef.current;
+    }
+  };
+
   const playSegment = async (i) => {
+    if (episodeMode) {
+      seekEpisode(segmentFractions(podcast)[i] ?? 0);
+      setPlayingIdx(i);
+      return;
+    }
     let url;
     try {
       url = await fetchSegmentWithRecovery(i, podcast);
@@ -1331,7 +1492,11 @@ function PodcastPanel({ doc, documentId, authedFetch }) {
   };
 
   const audioReady = audioState === "ready";
-  const progress = Math.min(((playingIdx + segProgress) / transcript.length) * 100, 100);
+  // Episode mode has a real continuous timeline; segment mode approximates
+  // one from the current clip index + progress within it.
+  const progress = episodeMode
+    ? Math.min(segProgress * 100, 100)
+    : Math.min(((playingIdx + segProgress) / transcript.length) * 100, 100);
 
   return (
     <div className="fade">
@@ -1391,7 +1556,10 @@ function PodcastPanel({ doc, documentId, authedFetch }) {
         {audioState === "generating" && (
           <span style={styles.audioStatus}>
             <span className="spinner" style={{ width: 16, height: 16, borderWidth: 2 }} />
-            Generating audio… {genProgress}/{transcript.length}
+            {/* Episode-track generation is one request with no per-segment
+                progress to count; the counter only applies to the
+                per-segment fallback providers. */}
+            Generating audio…{genProgress > 0 ? ` ${genProgress}/${transcript.length}` : ""}
           </span>
         )}
         {audioState === "error" && (
@@ -1413,7 +1581,12 @@ function PodcastPanel({ doc, documentId, authedFetch }) {
               onClick={(e) => {
                 const rect = e.currentTarget.getBoundingClientRect();
                 const pct = (e.clientX - rect.left) / rect.width;
-                playSegment(Math.min(Math.floor(pct * transcript.length), transcript.length - 1));
+                if (episodeMode) {
+                  // One continuous track — clicking the bar is a real seek.
+                  seekEpisode(Math.min(Math.max(pct, 0), 0.999));
+                } else {
+                  playSegment(Math.min(Math.floor(pct * transcript.length), transcript.length - 1));
+                }
               }}
             >
               <div style={{ ...styles.trackFill, width: `${progress}%` }} />
@@ -1421,7 +1594,7 @@ function PodcastPanel({ doc, documentId, authedFetch }) {
             </div>
             <div style={styles.timeRow}>
               <span>Segment {playingIdx + 1} / {transcript.length}</span>
-              <span>AI audio</span>
+              <span>AI audio{episodeMode ? " · full episode" : ""}</span>
             </div>
           </div>
         </div>
