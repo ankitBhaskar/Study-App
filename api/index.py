@@ -56,11 +56,12 @@ ELEVENLABS_TIMEOUT_SECONDS = 55.0
 TTS_PROVIDER = os.getenv("TTS_PROVIDER", "google").strip().lower()
 # Google Cloud Text-to-Speech (texttospeech.googleapis.com). Needs the
 # Cloud TTS API enabled on the key's Google Cloud project; the key falls
-# back to GEMINI_API_KEY when GOOGLE_TTS_API_KEY isn't set. WaveNet voices
-# cost $4/1M chars with a 1M-chars/month free tier. One voice narrates the
-# whole episode (WaveNet has no multi-speaker mode).
+# back to GEMINI_API_KEY when GOOGLE_TTS_API_KEY isn't set. Neural2 voices
+# cost $16/1M chars (WaveNet $4/1M), both with ~1M chars/month free. One
+# voice narrates the whole episode (these voices have no multi-speaker
+# mode).
 GOOGLE_TTS_API_BASE = os.getenv("GOOGLE_TTS_API_BASE", "https://texttospeech.googleapis.com/v1")
-GOOGLE_TTS_VOICE = os.getenv("GOOGLE_TTS_VOICE", "en-AU-Wavenet-D")
+GOOGLE_TTS_VOICE = os.getenv("GOOGLE_TTS_VOICE", "en-US-Neural2-F")
 GOOGLE_TTS_TIMEOUT_SECONDS = float(os.getenv("GOOGLE_TTS_TIMEOUT_SECONDS", "55"))
 # Cloud TTS rejects requests over 5,000 input bytes; scripts are capped at
 # 4,500 chars but multi-byte punctuation could push past, so episodes are
@@ -1747,8 +1748,8 @@ async def _google_tts_request(text: str, audio_config: dict[str, Any]) -> bytes:
             ),
         )
 
-    # "en-AU-Wavenet-D" → languageCode "en-AU"
-    language_code = "-".join(GOOGLE_TTS_VOICE.split("-")[:2]) or "en-AU"
+    # "en-US-Neural2-F" → languageCode "en-US"
+    language_code = "-".join(GOOGLE_TTS_VOICE.split("-")[:2]) or "en-US"
     body = {
         "input": {"text": text},
         "voice": {"languageCode": language_code, "name": GOOGLE_TTS_VOICE},

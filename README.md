@@ -13,7 +13,7 @@ A React/Vite study app that turns an uploaded PDF into a study workflow: Gemini-
 - Interactive quiz with scoring and weak-topic feedback; generate a fresh, non-repeating set of questions on demand, and every attempt is saved so past scores and answers can be reviewed later
 - Summary can be regenerated with a different length (concise/detailed) or focused on a specific topic in the document
 - Podcast player with generated transcript; regenerate the script in a different style (two-host conversation, solo narrator, or interview) at any time
-- Podcast playback defaults to the **browser's own built-in voice** (Web Speech API) — completely free, instant, no API call, no quota, works for every episode with zero setup. An optional "Generate AI-narrated audio" button still exists for higher-quality narration: it uses **Google Cloud Text-to-Speech by default** (WaveNet voice, whole episode synthesized in one fast call; needs the Cloud TTS API enabled on your Google Cloud project), with Gemini TTS (`TTS_PROVIDER=gemini`) and ElevenLabs (`TTS_PROVIDER=elevenlabs`) kept as alternatives, and only runs when explicitly tapped (never automatically) since it's a paid/quota-limited call. Once generated for a document, that AI audio is cached in Firestore and reused free on later visits
+- Podcast playback defaults to the **browser's own built-in voice** (Web Speech API) — completely free, instant, no API call, no quota, works for every episode with zero setup. An optional "Generate AI-narrated audio" button still exists for higher-quality narration: it uses **Google Cloud Text-to-Speech by default** (Neural2 voice, whole episode synthesized in one fast call; needs the Cloud TTS API enabled on your Google Cloud project), with Gemini TTS (`TTS_PROVIDER=gemini`) and ElevenLabs (`TTS_PROVIDER=elevenlabs`) kept as alternatives, and only runs when explicitly tapped (never automatically) since it's a paid/quota-limited call. Once generated for a document, that AI audio is cached in Firestore and reused free on later visits
 - Chat and summary text render markdown (bold, lists, etc.) instead of showing raw asterisks
 - Tutor chat answering questions scoped to the uploaded PDF via Gemini
 - "Try it with a sample document" demo mode that works without signing in
@@ -60,8 +60,8 @@ In Vercel: your project → **Settings → Environment Variables**:
 - `ELEVENLABS_API_KEY` — from <https://elevenlabs.io> (Profile → API Keys). Only needed if you set `TTS_PROVIDER=elevenlabs`
 - `FIREBASE_PROJECT_ID`, `FIREBASE_CLIENT_EMAIL`, `FIREBASE_PRIVATE_KEY` — the three matching fields from the service account JSON downloaded above (paste `private_key` exactly as it appears, including the `\n` sequences)
 - `VITE_FIREBASE_API_KEY`, `VITE_FIREBASE_AUTH_DOMAIN`, `VITE_FIREBASE_PROJECT_ID`, `VITE_FIREBASE_STORAGE_BUCKET`, `VITE_FIREBASE_MESSAGING_SENDER_ID`, `VITE_FIREBASE_APP_ID` — from the web `firebaseConfig` object above
-- `TTS_PROVIDER` — optional, `google` (default — Cloud TTS WaveNet, one call per episode), `gemini` or `elevenlabs`; picks the podcast text-to-speech backend
-- `GOOGLE_TTS_VOICE` — optional, defaults to `en-AU-Wavenet-D` (one narrator voice for the whole episode)
+- `TTS_PROVIDER` — optional, `google` (default — Cloud TTS Neural2 voice, one call per episode), `gemini` or `elevenlabs`; picks the podcast text-to-speech backend
+- `GOOGLE_TTS_VOICE` — optional, defaults to `en-US-Neural2-F` (one narrator voice for the whole episode)
 - `GOOGLE_TTS_API_KEY` — optional; only if you want Cloud TTS on a different key/project than `GEMINI_API_KEY`
 - `GEMINI_MODEL` — optional, defaults to `gemini-2.5-flash`
 - `GEMINI_TTS_MODEL` — optional, defaults to `gemini-2.5-flash-preview-tts`
