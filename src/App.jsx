@@ -7,6 +7,7 @@ import {
   FileText,
   Headphones,
   History,
+  Layers,
   ListChecks,
   LogOut,
   MessageCircle,
@@ -106,6 +107,7 @@ const MOCK = {
 const STEPS = [
   { id: "summary", label: "Summary", icon: Sparkles },
   { id: "quiz", label: "Quiz", icon: ListChecks },
+  { id: "cards", label: "Cards", icon: Layers },
   { id: "podcast", label: "Podcast", icon: Headphones },
   { id: "tutor", label: "Tutor", icon: MessageCircle },
 ];
@@ -579,6 +581,7 @@ function StudyScreen({ tab, setTab, fileName, doc, authedFetch }) {
       <section className="panel" style={styles.panel}>
         {tab === "summary" && <SummaryPanel doc={doc} documentId={doc.documentId} authedFetch={authedFetch} />}
         {tab === "quiz" && <QuizPanel doc={doc} documentId={doc.documentId} authedFetch={authedFetch} />}
+        {tab === "cards" && <FlashcardsPanel documentId={doc.documentId} authedFetch={authedFetch} />}
         {tab === "podcast" && <PodcastPanel doc={doc} documentId={doc.documentId} authedFetch={authedFetch} />}
         {tab === "tutor" && (
           <TutorPanel
@@ -962,6 +965,230 @@ function pickBrowserVoices() {
     // Some browsers never fire voiceschanged; fall back to whatever's loaded.
     setTimeout(tryPick, 500);
   });
+}
+
+// Sample-mode cards shown when there's no saved document to generate from.
+const MOCK_CARDS = [
+  { front: "Encoding", back: "Taking information in and converting it into a form memory can store." },
+  { front: "Storage", back: "Holding encoded information in memory over time." },
+  { front: "Retrieval", back: "Pulling stored information back out of memory when you need it." },
+  { front: "Working memory capacity", back: "You can only juggle about four to seven items at once." },
+  { front: "Spaced repetition", back: "Reviewing material at increasing intervals — far more effective than cramming." },
+  { front: "Active recall", back: "Testing yourself instead of re-reading; the effort of retrieval strengthens the memory trace." },
+];
+
+function FlashcardsPanel({ documentId, authedFetch }) {
+  // null while the saved sets are loading; [] when there are none yet.
+  const [sets, setSets] = useState(null);
+  const [setIdx, setSetIdx] = useState(0);
+  const [cardIdx, setCardIdx] = useState(0);
+  const [flipped, setFlipped] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+    setSets(null);
+    setSetIdx(0);
+    setCardIdx(0);
+    setFlipped(false);
+    setError("");
+    if (!documentId) {
+      setSets([]);
+      return undefined;
+    }
+    (async () => {
+      try {
+        const res = await authedFetch(`/api/documents/${documentId}/flashcards`);
+        const data = await res.json().catch(() => null);
+        if (!cancelled) setSets(res.ok && Array.isArray(data?.sets) ? data.sets : []);
+      } catch {
+        if (!cancelled) setSets([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [documentId]);
+
+  // Generating a new set never deletes the old ones — the backend keeps
+  // every previous set and the picker below switches between them.
+  const generate = async () => {
+    if (busy || !documentId) return;
+    setBusy(true);
+    setError("");
+    try {
+      const res = await authedFetch(`/api/documents/${documentId}/flashcards/regenerate`, { method: "POST" });
+      const data = await res.json().catch(() => null);
+      if (!res.ok) throw new Error(data?.detail || `Could not generate flashcards (error ${res.status}).`);
+      setSets([data.set, ...(sets || [])]);
+      setSetIdx(0);
+      setCardIdx(0);
+      setFlipped(false);
+    } catch (err) {
+      setError(
+        err instanceof TypeError ? "Could not reach the study service. Please try again in a moment." : err.message
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const usingMock = !documentId;
+  const loading = !usingMock && sets === null;
+  const cards = usingMock ? MOCK_CARDS : (sets && sets[setIdx]?.cards) || [];
+  const card = cards[cardIdx];
+
+  const goTo = (i) => {
+    setCardIdx(i);
+    setFlipped(false);
+  };
+
+  const pickSet = (i) => {
+    setSetIdx(i);
+    setCardIdx(0);
+    setFlipped(false);
+  };
+
+  const setLabel = (s, i) => {
+    if (i === 0) return "Latest";
+    const d = new Date(s.created_at);
+    return isNaN(d) ? `Set ${sets.length - i}` : d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  };
+
+  return (
+    <div className="fade">
+      <h3 style={{ ...styles.panelH, marginTop: 0 }}>Flashcards</h3>
+      <p style={styles.resultSub}>Six cards per set — tap a card to flip it.</p>
+
+      {loading && (
+        <p style={styles.resultSub}>
+          <span className="spinner" style={{ width: 14, height: 14, borderWidth: 2, marginRight: 8 }} />
+          Loading saved sets…
+        </p>
+      )}
+
+      {!loading && cards.length === 0 && (
+        <div style={{ margin: "18px 0" }}>
+          <p style={{ ...styles.resultSub, marginBottom: 14 }}>
+            No flashcards yet for this document. Generate a set of six cards grounded in the PDF.
+          </p>
+          <button style={{ ...styles.audioBtn, opacity: busy ? 0.6 : 1 }} onClick={generate} disabled={busy}>
+            {busy ? (
+              <span className="spinner" style={{ width: 14, height: 14, borderWidth: 2 }} />
+            ) : (
+              <Sparkles size={15} />
+            )}
+            {busy ? "Generating…" : "Generate flashcards"}
+          </button>
+        </div>
+      )}
+
+      {!loading && cards.length > 0 && (
+        <>
+          <button
+            onClick={() => setFlipped((f) => !f)}
+            aria-label={flipped ? "Show front" : "Show back"}
+            style={{
+              display: "block",
+              width: "100%",
+              minHeight: 190,
+              margin: "16px 0 10px",
+              padding: "26px 22px",
+              borderRadius: 16,
+              border: `1.5px solid ${flipped ? amber : moss}`,
+              background: flipped ? "#fdf7ec" : "#f3f7f4",
+              cursor: "pointer",
+              textAlign: "center",
+            }}
+          >
+            <span
+              style={{
+                display: "block",
+                fontSize: 11,
+                letterSpacing: 1.2,
+                textTransform: "uppercase",
+                color: flipped ? amber : moss,
+                marginBottom: 12,
+                fontWeight: 700,
+              }}
+            >
+              {flipped ? "Back · answer" : "Front · tap to flip"}
+            </span>
+            <span
+              style={{
+                display: "block",
+                fontSize: flipped ? 16 : 20,
+                lineHeight: 1.5,
+                color: "#26332b",
+                fontWeight: flipped ? 400 : 700,
+              }}
+            >
+              {flipped ? card.back : card.front}
+            </span>
+          </button>
+
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
+            <button
+              style={{ ...styles.audioBtn, padding: "6px 12px", opacity: cardIdx === 0 ? 0.4 : 1 }}
+              onClick={() => goTo(cardIdx - 1)}
+              disabled={cardIdx === 0}
+            >
+              ‹ Prev
+            </button>
+            <span style={{ fontSize: 13, color: "#6b7a70" }}>
+              Card {cardIdx + 1} / {cards.length}
+            </span>
+            <button
+              style={{ ...styles.audioBtn, padding: "6px 12px", opacity: cardIdx >= cards.length - 1 ? 0.4 : 1 }}
+              onClick={() => goTo(cardIdx + 1)}
+              disabled={cardIdx >= cards.length - 1}
+            >
+              Next ›
+            </button>
+          </div>
+
+          {!usingMock && (
+            <div style={{ borderTop: "1px solid #e4e0d5", paddingTop: 14 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                <button style={{ ...styles.audioBtn, opacity: busy ? 0.6 : 1 }} onClick={generate} disabled={busy}>
+                  {busy ? (
+                    <span className="spinner" style={{ width: 14, height: 14, borderWidth: 2 }} />
+                  ) : (
+                    <Sparkles size={15} />
+                  )}
+                  {busy ? "Generating…" : "New set"}
+                </button>
+                {sets.length > 1 &&
+                  sets.map((s, i) => (
+                    <button
+                      key={s.id || i}
+                      onClick={() => pickSet(i)}
+                      style={{
+                        ...styles.audioBtn,
+                        padding: "6px 12px",
+                        borderColor: i === setIdx ? moss : "#d8d4c8",
+                        background: i === setIdx ? "#eef4ef" : "#fff",
+                        color: i === setIdx ? mossDeep : "#6b7a70",
+                      }}
+                    >
+                      <History size={13} />
+                      {setLabel(s, i)}
+                    </button>
+                  ))}
+              </div>
+              <p style={{ ...styles.resultSub, marginTop: 10, fontSize: 12 }}>
+                New sets cover different ground; every earlier set stays saved here.
+              </p>
+            </div>
+          )}
+        </>
+      )}
+
+      {error && <p style={{ ...styles.resultSub, color: "#b03d2e", marginTop: 10 }}>{error}</p>}
+    </div>
+  );
 }
 
 function PodcastPanel({ doc, documentId, authedFetch }) {

@@ -105,6 +105,11 @@ MAX_STORED_CONTEXT_BYTES = 900_000
 # bounded number of past questions when asking Gemini to avoid repeats.
 MAX_QUIZ_ATTEMPTS = 20
 MAX_AVOID_QUESTIONS = 30
+# Flashcards: every set is 6 cards; generating a new set keeps the old ones
+# (bounded per document) and asks Gemini to avoid repeating recent fronts.
+FLASHCARDS_PER_SET = 6
+MAX_FLASHCARD_SETS = 10
+MAX_AVOID_CARDS = 30
 FIREBASE_PROJECT_ID = os.getenv("FIREBASE_PROJECT_ID")
 FIREBASE_CLIENT_EMAIL = os.getenv("FIREBASE_CLIENT_EMAIL")
 FIREBASE_PRIVATE_KEY = os.getenv("FIREBASE_PRIVATE_KEY")
@@ -253,6 +258,25 @@ class QuizAttemptListResponse(BaseModel):
 
 class QuizRegenerateResponse(BaseModel):
     quiz: list[QuizQuestion]
+
+
+class Flashcard(BaseModel):
+    front: str
+    back: str
+
+
+class FlashcardSet(BaseModel):
+    id: str
+    cards: list[Flashcard]
+    created_at: str
+
+
+class FlashcardSetListResponse(BaseModel):
+    sets: list[FlashcardSet]
+
+
+class FlashcardRegenerateResponse(BaseModel):
+    set: FlashcardSet
 
 
 class SummaryRegenerateRequest(BaseModel):
@@ -645,6 +669,60 @@ def list_quiz_attempts(uid: str, doc_id: str) -> list[QuizAttempt]:
     return attempts
 
 
+def _flashcard_sets_ref(db, uid: str, doc_id: str):
+    return (
+        db.collection("users")
+        .document(uid)
+        .collection("documents")
+        .document(doc_id)
+        .collection("flashcard_sets")
+    )
+
+
+def save_flashcard_set(uid: str, doc_id: str, cards: list[Flashcard]) -> FlashcardSet:
+    created_at = datetime.now(timezone.utc).isoformat()
+    db = get_firestore_client()
+    if db is None:
+        return FlashcardSet(id="", cards=cards, created_at=created_at)
+
+    sets_ref = _flashcard_sets_ref(db, uid, doc_id)
+    _, doc_ref = sets_ref.add(
+        {"cards": [c.model_dump() for c in cards], "created_at": created_at}
+    )
+    # Old sets are kept (that's the point — generating a new set never loses
+    # the previous ones), just bounded like quiz attempts are.
+    stale = list(
+        sets_ref.order_by("created_at", direction=firestore.Query.DESCENDING)
+        .offset(MAX_FLASHCARD_SETS)
+        .stream()
+    )
+    for extra in stale:
+        extra.reference.delete()
+    return FlashcardSet(id=doc_ref.id, cards=cards, created_at=created_at)
+
+
+def list_flashcard_sets(uid: str, doc_id: str) -> list[FlashcardSet]:
+    db = get_firestore_client()
+    if db is None:
+        return []
+    query = (
+        _flashcard_sets_ref(db, uid, doc_id)
+        .order_by("created_at", direction=firestore.Query.DESCENDING)
+        .limit(MAX_FLASHCARD_SETS)
+    )
+    sets = []
+    for snapshot in query.stream():
+        data = snapshot.to_dict() or {}
+        sets.append(
+            FlashcardSet(
+                id=snapshot.id,
+                cards=[Flashcard(**c) for c in data.get("cards", [])],
+                created_at=data.get("created_at", ""),
+            )
+        )
+    return sets
+
+
 def list_cached_segment_indices(uid: str, doc_id: str, ns: str) -> list[int]:
     db = get_firestore_client()
     if db is None:
@@ -977,6 +1055,36 @@ Do not repeat any question with the same meaning as one listed under "Questions 
 different questions, ideally covering different parts of the document. Everything must be grounded in the document content."""
 
 
+FLASHCARD_SYSTEM_INSTRUCTION = f"""You are an expert study assistant. Use ONLY the uploaded document content provided by the user.
+Generate a fresh set of EXACTLY {FLASHCARDS_PER_SET} study flashcards grounded in the document. Return a single JSON object with EXACTLY this shape (no markdown, no extra keys):
+{{
+  "cards": [
+    {{
+      "front": "a key term, concept or short question (under 80 characters)",
+      "back": "a concise definition or answer (under 240 characters)"
+    }}
+  ]
+}}
+Do not repeat any card with the same meaning as one listed under "Card fronts already used" below — write genuinely
+different cards, ideally covering different parts of the document. Everything must be grounded in the document content."""
+
+
+def parse_flashcards(raw: Any) -> list[Flashcard] | None:
+    cards_raw = raw.get("cards") if isinstance(raw, dict) else raw
+    cards: list[Flashcard] = []
+    for card in cards_raw or []:
+        if not isinstance(card, dict):
+            continue
+        front = str(card.get("front") or "").strip()[:120]
+        back = str(card.get("back") or "").strip()[:400]
+        if front and back:
+            cards.append(Flashcard(front=front, back=back))
+        if len(cards) == FLASHCARDS_PER_SET:
+            break
+    # A short set is useless as a study aid; treat it as a bad completion.
+    return cards if len(cards) >= 3 else None
+
+
 def parse_quiz_questions(quiz_raw: Any) -> list[QuizQuestion]:
     questions_raw = quiz_raw.get("questions") if isinstance(quiz_raw, dict) else quiz_raw
     quiz: list[QuizQuestion] = []
@@ -1189,6 +1297,8 @@ def _delete_document_and_subcollections(doc_ref) -> None:
         chat_doc.reference.delete()
     for attempt_doc in doc_ref.collection("quiz_attempts").stream():
         attempt_doc.reference.delete()
+    for set_doc in doc_ref.collection("flashcard_sets").stream():
+        set_doc.reference.delete()
     doc_ref.delete()
 
 
@@ -1428,6 +1538,54 @@ async def regenerate_quiz(doc_id: str, user: AuthedUser = Depends(require_user))
     doc_ref.update({"quiz": [q.model_dump() for q in quiz]})
     increment_usage(user.uid)
     return QuizRegenerateResponse(quiz=quiz)
+
+
+@app.get("/api/documents/{doc_id}/flashcards", response_model=FlashcardSetListResponse)
+async def get_flashcard_sets(doc_id: str, user: AuthedUser = Depends(require_user)) -> FlashcardSetListResponse:
+    # Storage only — every previously generated set, newest first.
+    return FlashcardSetListResponse(sets=list_flashcard_sets(user.uid, doc_id))
+
+
+@app.post("/api/documents/{doc_id}/flashcards/regenerate", response_model=FlashcardRegenerateResponse)
+async def regenerate_flashcards(doc_id: str, user: AuthedUser = Depends(require_user)) -> FlashcardRegenerateResponse:
+    check_usage_limit(user.uid)
+
+    _, data = _get_document_or_404(user.uid, doc_id)
+    context = _require_document_context(data, "flashcard set")
+
+    # Ask Gemini to avoid repeating recent sets' fronts, so a new set covers
+    # genuinely new ground. Old sets are NOT deleted — they stay listed.
+    avoid: list[str] = []
+    for card_set in list_flashcard_sets(user.uid, doc_id)[:5]:
+        for card in card_set.cards:
+            if card.front not in avoid:
+                avoid.append(card.front)
+    avoid = avoid[:MAX_AVOID_CARDS]
+    avoid_block = "\n".join(f"- {front}" for front in avoid) if avoid else "(none yet)"
+
+    contents = [
+        {
+            "role": "user",
+            "parts": [
+                {
+                    "text": (
+                        f"File name: {data.get('file_name', 'uploaded-document.pdf')}\n\n"
+                        f"Card fronts already used (avoid repeating these or close variants):\n{avoid_block}\n\n"
+                        "Document content:\n\n"
+                        f"{context}"
+                    )
+                }
+            ],
+        }
+    ]
+    raw_text = await call_gemini(FLASHCARD_SYSTEM_INSTRUCTION, contents, json_response=True)
+    cards = parse_flashcards(parse_json_text(raw_text))
+    if not cards:
+        raise HTTPException(status_code=502, detail="Gemini response did not include usable flashcards.")
+
+    card_set = save_flashcard_set(user.uid, doc_id, cards)
+    increment_usage(user.uid)
+    return FlashcardRegenerateResponse(set=card_set)
 
 
 def _get_document_or_404(uid: str, doc_id: str):

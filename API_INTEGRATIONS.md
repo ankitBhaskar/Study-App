@@ -18,13 +18,13 @@ Gemini is used for study-content generation, Tutor chat, per-section regeneratio
 - Base URL: `GEMINI_API_BASE` env var, default `https://generativelanguage.googleapis.com/v1beta`
 - Model (text): `GEMINI_MODEL` env var, default `gemini-2.5-flash` (`api/index.py:38`)
 - Auth: `x-goog-api-key` header, key from `GEMINI_API_KEY` (or `GOOGLE_API_KEY`)
-- Shared text transport: `call_gemini()` — `api/index.py:796-844`
+- Shared text transport: `call_gemini()` — `api/index.py:874-922`
 
 ### 1.1 Shared transport — `call_gemini()`
 
-**File/line:** `api/index.py:796`
+**File/line:** `api/index.py:874`
 
-**Request built** (`api/index.py:807-820`):
+**Request built** (`api/index.py:885-898`):
 
 ```json
 POST {GEMINI_API_BASE}/models/{GEMINI_MODEL}:generateContent
@@ -40,13 +40,13 @@ Header: x-goog-api-key: <GEMINI_API_KEY>
 }
 ```
 
-Response parsed at `api/index.py:835-844`. Raises `HTTPException(502)` on non-200,
+Response parsed at `api/index.py:913-922`. Raises `HTTPException(502)` on non-200,
 unexpected shape, or empty completion.
 
 ### 1.2 Shared style/length guidance
 
-`PODCAST_STYLE_GUIDANCE` (`api/index.py:867`) and `SUMMARY_LENGTH_GUIDANCE`
-(`api/index.py:885`) back both the combined analysis prompt and the standalone regenerate
+`PODCAST_STYLE_GUIDANCE` (`api/index.py:945`) and `SUMMARY_LENGTH_GUIDANCE`
+(`api/index.py:963`) back both the combined analysis prompt and the standalone regenerate
 prompts, so a chosen style/length reads consistently either way.
 
 - **Podcast styles** `{"conversation", "solo", "interview"}` — two-host banter / single narrator / host+expert-guest. Invalid → `conversation`.
@@ -60,13 +60,13 @@ prompts, so a chosen style/length reads consistently either way.
 
 ### 1.3 Study analysis (`POST /api/pdf/analyze`)
 
-**Handler:** `api/index.py:1231` · **Frontend:** `src/App.jsx:329`
+**Handler:** `api/index.py:1341` · **Frontend:** `src/App.jsx:329`
 
-Multipart form: `file: UploadFile` (PDF ≤4 MB, `read_pdf_upload()` at `api/index.py:1070`)
+Multipart form: `file: UploadFile` (PDF ≤4 MB, `read_pdf_upload()` at `api/index.py:1178`)
 plus optional `podcast_style` / `summary_length` / `summary_focus` Form fields and the
 `Authorization` header.
 
-**Prompt** built by `build_study_system_instruction()` (`api/index.py:905-935`) — a single
+**Prompt** built by `build_study_system_instruction()` (`api/index.py:983-1013`) — a single
 JSON-shaped instruction producing `title` + `summary` + `quiz` + `podcastScript`, with the
 summary/podcast guidance lines swapped in from §1.2, including the line:
 
@@ -84,12 +84,12 @@ Extracted PDF content:
 {context}   # extracted text, truncated to MAX_GEMINI_CONTEXT_CHARS = 400,000 chars (api/index.py:36)
 ```
 
-Called at `api/index.py:1266`. Normalised by `normalise_study_content()`
-(`api/index.py:1052`) via `parse_summary_points()` (`api/index.py:1006`),
-`parse_quiz_questions()` (`api/index.py:980`), `parse_podcast_script()` (`api/index.py:1012`,
+Called at `api/index.py:1376`. Normalised by `normalise_study_content()`
+(`api/index.py:1160`) via `parse_summary_points()` (`api/index.py:1114`),
+`parse_quiz_questions()` (`api/index.py:1088`), `parse_podcast_script()` (`api/index.py:1120`,
 see §1.8 for the character-cap enforcement).
 
-**Output — `StudyAnalysisResponse`, `api/index.py:186-199`:**
+**Output — `StudyAnalysisResponse`, `api/index.py:191-209`:**
 
 ```json
 {
@@ -104,33 +104,33 @@ see §1.8 for the character-cap enforcement).
 
 ### 1.4 Tutor chat (`POST /api/chat`)
 
-**Handler:** `api/index.py:1309` · **Frontend:** `src/App.jsx:1318` (`TutorPanel.send()`)
+**Handler:** `api/index.py:1419` · **Frontend:** `src/App.jsx:1318` (`TutorPanel.send()`)
 
 Per-request system prompt: *"You are a friendly study tutor. Answer questions using ONLY
 the uploaded document below…"* + file name + document context. Last 20 turns passed as
 `contents`; called plain-text (`json_response=False`).
 
-**Input — `ChatRequest`, `api/index.py:212-216`** · **Output — `ChatResponse`, `api/index.py:219-220`** (`{ "answer": "string" }`).
+**Input — `ChatRequest`, `api/index.py:217-221`** · **Output — `ChatResponse`, `api/index.py:224-225`** (`{ "answer": "string" }`).
 
 ### 1.5 Quiz regeneration (`POST /api/documents/{doc_id}/quiz/regenerate`)
 
-**Handler:** `api/index.py:1390` · **Frontend:** `src/App.jsx:801`
+**Handler:** `api/index.py:1500` · **Frontend:** `src/App.jsx:801`
 
-Prompt `QUIZ_SYSTEM_INSTRUCTION` (`api/index.py:963`). Avoid-list = current quiz + last 5
+Prompt `QUIZ_SYSTEM_INSTRUCTION` (`api/index.py:1041`). Avoid-list = current quiz + last 5
 attempts' questions, capped at `MAX_AVOID_QUESTIONS` = 30 (`api/index.py:107`). Overwrites
-stored `quiz`. Output `QuizRegenerateResponse` (`api/index.py:254-255`).
+stored `quiz`. Output `QuizRegenerateResponse` (`api/index.py:259-260`).
 
 ### 1.6 Summary regeneration (`POST /api/documents/{doc_id}/summary/regenerate`)
 
-**Handler:** `api/index.py:1452` · **Frontend:** `src/App.jsx:656`
+**Handler:** `api/index.py:1610` · **Frontend:** `src/App.jsx:656`
 
-Prompt `build_summary_system_instruction()` (`api/index.py:938-944`). Overwrites stored
-`summary`. Input `SummaryRegenerateRequest` (`api/index.py:258-260`, `{length, focus}`),
-output `SummaryRegenerateResponse` (`api/index.py:263-264`).
+Prompt `build_summary_system_instruction()` (`api/index.py:1016-1023`). Overwrites stored
+`summary`. Input `SummaryRegenerateRequest` (`api/index.py:282-284`, `{length, focus}`),
+output `SummaryRegenerateResponse` (`api/index.py:287-288`).
 
 ### 1.7 Podcast style switch / regeneration (`POST /api/documents/{doc_id}/podcast/regenerate`)
 
-**Handler:** `api/index.py:1494` · **Frontend:** `src/App.jsx` (`regenerateScript`)
+**Handler:** `api/index.py:1652` · **Frontend:** `src/App.jsx` (`regenerateScript`)
 
 **Every generated style version is kept.** The parent document stores `podcast_style`
 (active style) and `podcast_versions` (`{style: script + audio_ns}`), and cached audio is
@@ -143,21 +143,21 @@ or audio:
   AI sparkle, and restores the AI player immediately if that version's audio is fully
   cached.
 - **Requested style never generated** → calls Gemini with
-  `build_podcast_system_instruction()` (`api/index.py:948-960`) — same style guidance and
+  `build_podcast_system_instruction()` (`api/index.py:1026-1038`) — same style guidance and
   `MAX_PODCAST_SCRIPT_CHARS` budget as §1.3 — saves the new version, makes it active, and
   clears only that style's own audio namespace (other styles keep theirs).
 - **Pre-versioning documents** are migrated on first touch: the existing script is adopted
   as the saved version of its guessed style (`_guess_podcast_style()`, host count) with
   `audio_ns: "legacy"`, so audio cached under the old integer IDs stays reachable.
 
-Input `PodcastRegenerateRequest` (`api/index.py:267-268`, `{style}`), output
-`PodcastRegenerateResponse` (`api/index.py:271-277`,
+Input `PodcastRegenerateRequest` (`api/index.py:291-292`, `{style}`), output
+`PodcastRegenerateResponse` (`api/index.py:295-301`,
 `{podcast, podcast_style, saved_styles, reused}`). `saved_styles` also comes back from
 `POST /api/pdf/analyze` and `GET /api/documents/{doc_id}` so the UI can mark chips on load.
 
 ### 1.8 Podcast script length enforcement — `parse_podcast_script()`
 
-**File/line:** `api/index.py:1012-1049` (shared by §1.3 and §1.7 — both the initial analysis
+**File/line:** `api/index.py:1120-1157` (shared by §1.3 and §1.7 — both the initial analysis
 and every regeneration go through this same parser).
 
 The prompt (§1.2) asks Gemini to stay under `MAX_PODCAST_SCRIPT_CHARS` = 4,500 characters
@@ -176,6 +176,24 @@ Verified against the real `/api/pdf/analyze` and `.../podcast/regenerate` endpoi
 mocked 30-segment Gemini response that ignored the prompt entirely: the persisted script
 (both the API response and what's written to Firestore) stayed at exactly the 4,500-char
 cap, and quiz/summary parsing were unaffected.
+
+### 1.9 Flashcards (`GET /api/documents/{doc_id}/flashcards`, `POST …/flashcards/regenerate`)
+
+**Handlers:** `api/index.py:1543` (list, storage only) and `api/index.py:1543` (generate) ·
+**Frontend:** `src/App.jsx` (`FlashcardsPanel`, the "Cards" tab).
+
+Prompt `FLASHCARD_SYSTEM_INSTRUCTION` (`api/index.py:1058`) asks for EXACTLY
+`FLASHCARDS_PER_SET` = 6 cards (`api/index.py:110`) as `{"cards": [{"front", "back"}]}`,
+grounded in the document. Parsed/enforced by `parse_flashcards()` (`api/index.py:1072`):
+trimmed to 6, fronts capped at 120 chars and backs at 400, fewer than 3 usable cards → 502.
+
+**Generating a new set never deletes the old ones.** Each set is saved as its own document
+under `flashcard_sets/{auto_id}` (`save_flashcard_set()`, `api/index.py:682`), newest first
+in the list endpoint, bounded to `MAX_FLASHCARD_SETS` = 10 (`api/index.py:111`, oldest
+trimmed). The regenerate prompt carries an avoid-list of up to `MAX_AVOID_CARDS` = 30
+recent card fronts (same pattern as quiz §1.5) so a new set covers different ground. The
+UI's set picker switches between saved sets locally — no API call. Generation counts 1
+usage unit; listing is free.
 
 ---
 
@@ -196,9 +214,9 @@ Each podcast transcript line is synthesised to audio. The backend is selected by
 **`TTS_PROVIDER`** (`api/index.py:56`), default **`google`** (Cloud Text-to-Speech —
 synthesizes the whole episode in ONE fast call); `gemini` and `elevenlabs` remain fully
 selectable. All three paths live in the code; only the selected one runs. Dispatch is in
-the segment-audio handler (`api/index.py:1992`).
+the segment-audio handler (`api/index.py:2150`).
 
-**Endpoint:** `POST /api/podcast/segment-audio` — handler at `api/index.py:1958`
+**Endpoint:** `POST /api/podcast/segment-audio` — handler at `api/index.py:2116`
 **Frontend call site:** `src/App.jsx` (`PodcastPanel`'s `ensureSegmentUrl()`, only called
 once the user taps "Generate AI-narrated audio"). `generateAudioFor` fetches segments
 **strictly sequentially** — a cache miss generates a whole batch server-side, so two
@@ -212,13 +230,13 @@ re-generates if the segment never appears (3 attempts total, non-5xx HTTP errors
 immediately). The frontend is provider-agnostic: it reads `res.blob()` and plays it, so WAV
 or MP3 both work.
 
-A cache check runs first (`api/index.py:1968`): if `document_id` + `segment_index` are given
+A cache check runs first (`api/index.py:2135`): if `document_id` + `segment_index` are given
 and that segment was already generated, the stored bytes are returned with their stored MIME
 (no TTS call). See §4.
 
 **Document-tied requests generate MANY segments per call, not one.** When a request
 carries a `document_id` + `segment_index` (i.e. it's tied to a saved document, not an
-ad-hoc preview), the handler (`api/index.py:1999-2024`) fetches that document's full
+ad-hoc preview), the handler (`api/index.py:2157-2182`) fetches that document's full
 transcript from Firestore, generates in bulk, caches every resulting segment via
 `save_segment_audio()` and calls `increment_usage()` once:
 
@@ -233,22 +251,22 @@ transcript from Firestore, generates in bulk, caches every resulting segment via
   `GEMINI_TTS_TIMEOUT_SECONDS` = 280s (`api/index.py:79`).
 
 If there's no matching document/transcript (e.g. an ad-hoc single-line preview), the
-handler falls back to a single-segment call (`api/index.py:2026-2035`). The ElevenLabs path
+handler falls back to a single-segment call (`api/index.py:2184-2193`). The ElevenLabs path
 (§2.3) is unchanged — always one call per segment.
 
 Shared plumbing for both bulk paths: the combined PCM is sliced into one WAV clip per
-segment by `_split_pcm_by_chars()` (`api/index.py:1697-1718`) — boundaries proportional to
+segment by `_split_pcm_by_chars()` (`api/index.py:1855-1876`) — boundaries proportional to
 each segment's character share (a heuristic; neither API returns per-segment timing),
 aligned to whole 16-bit samples. Sliced segments can exceed one Firestore document, so
-cached audio is **chunked**: `save_segment_audio()` (`api/index.py:540`) splits anything
+cached audio is **chunked**: `save_segment_audio()` (`api/index.py:564`) splits anything
 over `MAX_CACHED_AUDIO_BYTES` = 740,000 raw bytes (`api/index.py:89`) across sibling chunk
-documents (`_audio_chunk_ref()`, `api/index.py:496`) and `get_cached_segment_audio()`
-(`api/index.py:514`) reassembles them; a missing chunk reads as a cache miss.
+documents (`_audio_chunk_ref()`, `api/index.py:520`) and `get_cached_segment_audio()`
+(`api/index.py:538`) reassembles them; a missing chunk reads as a cache miss.
 
 ### 2.1 Google Cloud Text-to-Speech (default) — one continuous episode track
 
 - Base URL: `GOOGLE_TTS_API_BASE`, default `https://texttospeech.googleapis.com/v1` (`api/index.py:63`)
-- Auth: `x-goog-api-key` header — `GOOGLE_TTS_API_KEY`, falling back to `GEMINI_API_KEY` (`get_google_tts_api_key()`, `api/index.py:338`). **The Cloud Text-to-Speech API must be enabled on the key's Google Cloud project** (the 403 error message links to the enable page). Pricing: Neural2 $16/1M chars, WaveNet $4/1M, ~1M free chars/month.
+- Auth: `x-goog-api-key` header — `GOOGLE_TTS_API_KEY`, falling back to `GEMINI_API_KEY` (`get_google_tts_api_key()`, `api/index.py:362`). **The Cloud Text-to-Speech API must be enabled on the key's Google Cloud project** (the 403 error message links to the enable page). Pricing: Neural2 $16/1M chars, WaveNet $4/1M, ~1M free chars/month.
 - Voice: `GOOGLE_TTS_VOICE`, default `en-US-Neural2-F` (`api/index.py:64`); `languageCode` derived from the voice name. **One narrator voice for the whole episode** — Neural2/WaveNet voices have no multi-speaker mode, so both hosts share it; speaker names are never included in the synthesized text.
 
 **Preferred flow — `POST /api/podcast/episode-audio`** (`{document_id}`): returns the WHOLE
@@ -279,14 +297,14 @@ punctuation can force a rare second call (MP3 parts are concatenated). Shared tr
 `_google_tts_request()`; `google_tts()` handles ad-hoc single segments. Timeout
 `GOOGLE_TTS_TIMEOUT_SECONDS` = 55s (`api/index.py:65`) — synthesis takes seconds.
 
-### 2.2 Gemini TTS (opt-in, `TTS_PROVIDER=gemini`) — `gemini_tts()`, `api/index.py:1647-1694`
+### 2.2 Gemini TTS (opt-in, `TTS_PROVIDER=gemini`) — `gemini_tts()`, `api/index.py:1805-1852`
 
 - Model: `GEMINI_TTS_MODEL` env var, default `gemini-2.5-flash-preview-tts` (`api/index.py:71`)
-- Voices: `GEMINI_TTS_VOICE_A` / `GEMINI_TTS_VOICE_B`, default `Kore` / `Puck` (`api/index.py:74-75`), chosen by `request.speaker` (0/1)
+- Voices: `GEMINI_TTS_VOICE_A` / `GEMINI_TTS_VOICE_B`, default `Kore` / `Puck` (`api/index.py:75-75`), chosen by `request.speaker` (0/1)
 - Auth: `x-goog-api-key` header, reuses `GEMINI_API_KEY`
-- Batch generation: `_tts_batch_bounds()` (`api/index.py:1850-1869`) groups consecutive
+- Batch generation: `_tts_batch_bounds()` (`api/index.py:2008-2027`) groups consecutive
   segments into ≤`GEMINI_TTS_BATCH_CHARS` batches; `gemini_tts_batch()`
-  (`api/index.py:1872-1956`) builds one "SpeakerName: line" block per batch and uses
+  (`api/index.py:2030-2113`) builds one "SpeakerName: line" block per batch and uses
   `multiSpeakerVoiceConfig` when two hosts speak (labels are a synthesis directive, not
   spoken aloud), plain `voiceConfig` for solo narration.
 
@@ -305,14 +323,14 @@ Header: x-goog-api-key: <GEMINI_API_KEY>
 
 Response carries base64 PCM in `candidates[0].content.parts[0].inlineData`
 (`mimeType` like `audio/L16;codec=pcm;rate=24000`). Gemini returns raw 16-bit PCM, which
-browsers can't play directly, so `pcm_to_wav()` (`api/index.py:1587-1601`) wraps it in a WAV
+browsers can't play directly, so `pcm_to_wav()` (`api/index.py:1745-1759`) wraps it in a WAV
 header (sample rate parsed from the mimeType). **Output:** `audio/wav` bytes.
 
-### 2.3 ElevenLabs (opt-in, `TTS_PROVIDER=elevenlabs`) — `elevenlabs_tts()`, `api/index.py:1604-1644`
+### 2.3 ElevenLabs (opt-in, `TTS_PROVIDER=elevenlabs`) — `elevenlabs_tts()`, `api/index.py:1762-1802`
 
 - Base URL: `ELEVENLABS_API_BASE`, default `https://api.elevenlabs.io/v1`; model `ELEVENLABS_MODEL`, default `eleven_multilingual_v2`
 - Auth: `xi-api-key` header, key from `ELEVENLABS_API_KEY`
-- Voices resolved from the account via `resolve_voice_ids()` (`api/index.py:351-380`; avoids the free-tier 402 on library voices), cached in-process (`_cached_voice_ids`, `api/index.py:348`); `ELEVENLABS_VOICE_HOST_A/B` override when both set
+- Voices resolved from the account via `resolve_voice_ids()` (`api/index.py:375-404`; avoids the free-tier 402 on library voices), cached in-process (`_cached_voice_ids`, `api/index.py:375`); `ELEVENLABS_VOICE_HOST_A/B` override when both set
 
 ```
 POST {ELEVENLABS_API_BASE}/text-to-speech/{voice_id}?output_format=mp3_44100_128
@@ -325,7 +343,7 @@ Header: xi-api-key: <ELEVENLABS_API_KEY>
 
 **Output:** `audio/mpeg` bytes.
 
-**Input to the endpoint — `SegmentAudioRequest`, `api/index.py:280-287`:**
+**Input to the endpoint — `SegmentAudioRequest`, `api/index.py:304-311`:**
 
 ```json
 { "text": "string", "speaker": 0, "document_id": "string | null", "segment_index": 0 }
@@ -338,7 +356,7 @@ Header: xi-api-key: <ELEVENLABS_API_KEY>
 Gates uploading, chat, regeneration and podcast audio behind sign-in; identifies the user
 for storage and usage limits.
 
-- **Backend:** `require_user()` (`api/index.py:435-457`) — FastAPI dependency (`Depends(require_user)`). Reads `Authorization: Bearer <idToken>`, verifies via `firebase_auth.verify_id_token()`, enforces the `ALLOWED_EMAILS` allowlist (403), returns `AuthedUser {uid, email}` (`api/index.py:301-303`). Admin init: `get_firebase_app()` (`api/index.py:389-410`).
+- **Backend:** `require_user()` (`api/index.py:459-481`) — FastAPI dependency (`Depends(require_user)`). Reads `Authorization: Bearer <idToken>`, verifies via `firebase_auth.verify_id_token()`, enforces the `ALLOWED_EMAILS` allowlist (403), returns `AuthedUser {uid, email}` (`api/index.py:325-327`). Admin init: `get_firebase_app()` (`api/index.py:127-131`).
 - **Frontend:** `src/firebase.js` inits the client SDK. Sign-in `signInWithEmailAndPassword` (`src/App.jsx:138`); session watch `onAuthStateChanged` (`src/App.jsx:204`); `authedFetch()` (`src/App.jsx:206`) attaches `auth.currentUser.getIdToken()` (`src/App.jsx:207`) as a Bearer token on every call.
 
 ---
@@ -347,24 +365,25 @@ for storage and usage limits.
 
 Storage only — no LLM/TTS cost (the regenerate endpoints do call Gemini, but that cost is
 the Gemini call, not the Firestore write). Client: `get_firestore_client()`
-(`api/index.py:416-432`). Layout under `users/{uid}/documents/{doc_id}`:
+(`api/index.py:440-456`). Layout under `users/{uid}/documents/{doc_id}`:
 
 | Path | Written by | File/line | Contents |
 |---|---|---|---|
-| `documents/{doc_id}` | `analyze_pdf()` | `api/index.py:1231` | `title`, `file_name`, `summary`, `quiz`, `podcast` (active script), `podcast_style` (active style), `podcast_versions` (`{style: script + audio_ns}` — every generated style version, ≤4,500 chars each, reused on style switch per §1.7), `document_context` (≤`MAX_STORED_CONTEXT_BYTES` = 900 KB, `api/index.py:103`), `created_at`. `summary`/`quiz` are overwritten in place by §1.5–1.6 |
-| `documents/{doc_id}/audio/{style}.{segment_index}` | `save_segment_audio()` | `api/index.py:540` | `{ "data": "<base64 audio>", "mime": "audio/wav" \| "audio/mpeg", "chunks": N }` — one doc per segment plus a `{style}.full` sentinel doc holding the single continuous MP3 episode track (§2.1), **namespaced per podcast style** (`_audio_doc_id()`, `api/index.py:471`) so every generated style keeps its own audio; pre-versioning audio lives under plain integer IDs (the `"legacy"` namespace, still served). Audio over `MAX_CACHED_AUDIO_BYTES` = 740 KB raw (`api/index.py:89`) is split across sibling chunk docs `….c{n}` (`{ "data": ... }` only) and reassembled on read by `get_cached_segment_audio()` (`api/index.py:514`); a missing chunk reads as a cache miss. Fresh regeneration of a style clears only that style's namespace (§1.7); document deletion drops the whole subcollection |
-| `documents/{doc_id}/chat/log` | `save_chat_log()` | `api/index.py:1357` | `{ "messages": [...] }` — last `MAX_STORED_CHAT_MESSAGES` = 60, each text ≤`MAX_STORED_CHAT_TEXT_BYTES` = 10 KB (`api/index.py:99-100`) |
-| `documents/{doc_id}/quiz_attempts/{auto_id}` | `save_quiz_attempt()` | `api/index.py:587-620` | `{ questions, answers, score, total, created_at }` — score computed server-side; capped at `MAX_QUIZ_ATTEMPTS` = 20 (`api/index.py:106`) |
-| `usage/{yyyy-mm-dd}` | `increment_usage()` | `api/index.py:686-691` | `{ count, date }` — shared daily counter across analyze/chat/quiz-/summary-/podcast-regenerate/audio-generate |
+| `documents/{doc_id}` | `analyze_pdf()` | `api/index.py:1341` | `title`, `file_name`, `summary`, `quiz`, `podcast` (active script), `podcast_style` (active style), `podcast_versions` (`{style: script + audio_ns}` — every generated style version, ≤4,500 chars each, reused on style switch per §1.7), `document_context` (≤`MAX_STORED_CONTEXT_BYTES` = 900 KB, `api/index.py:103`), `created_at`. `summary`/`quiz` are overwritten in place by §1.5–1.6 |
+| `documents/{doc_id}/audio/{style}.{segment_index}` | `save_segment_audio()` | `api/index.py:564` | `{ "data": "<base64 audio>", "mime": "audio/wav" \| "audio/mpeg", "chunks": N }` — one doc per segment plus a `{style}.full` sentinel doc holding the single continuous MP3 episode track (§2.1), **namespaced per podcast style** (`_audio_doc_id()`, `api/index.py:495`) so every generated style keeps its own audio; pre-versioning audio lives under plain integer IDs (the `"legacy"` namespace, still served). Audio over `MAX_CACHED_AUDIO_BYTES` = 740 KB raw (`api/index.py:89`) is split across sibling chunk docs `….c{n}` (`{ "data": ... }` only) and reassembled on read by `get_cached_segment_audio()` (`api/index.py:538`); a missing chunk reads as a cache miss. Fresh regeneration of a style clears only that style's namespace (§1.7); document deletion drops the whole subcollection |
+| `documents/{doc_id}/chat/log` | `save_chat_log()` | `api/index.py:1467` | `{ "messages": [...] }` — last `MAX_STORED_CHAT_MESSAGES` = 60, each text ≤`MAX_STORED_CHAT_TEXT_BYTES` = 10 KB (`api/index.py:100-100`) |
+| `documents/{doc_id}/quiz_attempts/{auto_id}` | `save_quiz_attempt()` | `api/index.py:611-644` | `{ questions, answers, score, total, created_at }` — score computed server-side; capped at `MAX_QUIZ_ATTEMPTS` = 20 (`api/index.py:106`) |
+| `documents/{doc_id}/flashcard_sets/{auto_id}` | `save_flashcard_set()` | `api/index.py:682` | `{ cards: [{front, back}], created_at }` — one document per generated set of 6 cards; every set is kept (newest first), capped at `MAX_FLASHCARD_SETS` = 10 (`api/index.py:111`). Deleted with the document |
+| `usage/{yyyy-mm-dd}` | `increment_usage()` | `api/index.py:764-769` | `{ count, date }` — shared daily counter across analyze/chat/quiz-/summary-/podcast-regenerate/audio-generate |
 
-Reads: `list_documents()` (`api/index.py:1131`), `get_document()` (`api/index.py:1161`),
-`get_cached_segment_audio()` (`api/index.py:514`, returns bytes + MIME; legacy docs without
-`mime` default to `audio/mpeg`), `list_cached_segment_indices()` (`api/index.py:648-669`),
-`get_chat_log()` (`api/index.py:1343`), `list_quiz_attempts()` (`api/index.py:623-647`).
+Reads: `list_documents()` (`api/index.py:1239`), `get_document()` (`api/index.py:1269`),
+`get_cached_segment_audio()` (`api/index.py:538`, returns bytes + MIME; legacy docs without
+`mime` default to `audio/mpeg`), `list_cached_segment_indices()` (`api/index.py:726-747`),
+`get_chat_log()` (`api/index.py:1453`), `list_quiz_attempts()` (`api/index.py:647-669`).
 Deletes cascade to `audio`/`chat`/`quiz_attempts` via `_delete_document_and_subcollections()`
-(`api/index.py:1182-1192`). Two small shared helpers back the regenerate endpoints:
-`_get_document_or_404()` (`api/index.py:1433-1439`) and `_require_document_context()`
-(`api/index.py:1442-1449`).
+(`api/index.py:1290-1302`). Two small shared helpers back the regenerate endpoints:
+`_get_document_or_404()` (`api/index.py:1591-1597`) and `_require_document_context()`
+(`api/index.py:1591-1607`).
 
 ---
 
@@ -372,24 +391,26 @@ Deletes cascade to `audio`/`chat`/`quiz_attempts` via `_delete_document_and_subc
 
 | Method | Path | Auth | Handler | External API |
 |---|---|---|---|---|
-| GET | `/api/health` | none | `api/index.py:1091` | — (reports `tts_provider`) |
-| GET | `/api/profile` | required | `api/index.py:1108` | Firestore |
-| GET | `/api/documents` | required | `api/index.py:1131` | Firestore |
-| GET | `/api/documents/{doc_id}` | required | `api/index.py:1161` | Firestore |
-| DELETE | `/api/documents/{doc_id}` | required | `api/index.py:1195` | Firestore |
-| DELETE | `/api/documents` | required | `api/index.py:1204` | Firestore |
-| POST | `/api/pdf/prepare` | none | `api/index.py:1213` | — |
-| POST | `/api/pdf/analyze` | required | `api/index.py:1231` | Gemini, Firestore |
-| POST | `/api/chat` | required | `api/index.py:1309` | Gemini |
-| GET | `/api/documents/{doc_id}/chat` | required | `api/index.py:1343` | Firestore |
-| PUT | `/api/documents/{doc_id}/chat` | required | `api/index.py:1357` | Firestore |
-| GET | `/api/documents/{doc_id}/quiz/attempts` | required | `api/index.py:1374` | Firestore |
-| POST | `/api/documents/{doc_id}/quiz/attempts` | required | `api/index.py:1379` | Firestore |
-| POST | `/api/documents/{doc_id}/quiz/regenerate` | required | `api/index.py:1390` | Gemini, Firestore |
-| POST | `/api/documents/{doc_id}/summary/regenerate` | required | `api/index.py:1452` | Gemini, Firestore |
-| POST | `/api/documents/{doc_id}/podcast/regenerate` | required | `api/index.py:1494` | Gemini, Firestore |
-| GET | `/api/podcast/audio-status/{doc_id}` | required | `api/index.py:1562` | Firestore |
-| POST | `/api/podcast/episode-audio` | required | `api/index.py:2038` | Google Cloud TTS (whole episode as ONE MP3 track, on cache miss), Firestore |
-| POST | `/api/podcast/segment-audio` | required | `api/index.py:1958` | Google Cloud TTS (whole episode, 1 call) **or** Gemini TTS (≤2,250-char batches) **or** ElevenLabs (1 call/segment) — on cache miss only — plus Firestore |
+| GET | `/api/health` | none | `api/index.py:1199` | — (reports `tts_provider`) |
+| GET | `/api/profile` | required | `api/index.py:1216` | Firestore |
+| GET | `/api/documents` | required | `api/index.py:1239` | Firestore |
+| GET | `/api/documents/{doc_id}` | required | `api/index.py:1269` | Firestore |
+| DELETE | `/api/documents/{doc_id}` | required | `api/index.py:1305` | Firestore |
+| DELETE | `/api/documents` | required | `api/index.py:1314` | Firestore |
+| POST | `/api/pdf/prepare` | none | `api/index.py:1323` | — |
+| POST | `/api/pdf/analyze` | required | `api/index.py:1341` | Gemini, Firestore |
+| POST | `/api/chat` | required | `api/index.py:1419` | Gemini |
+| GET | `/api/documents/{doc_id}/chat` | required | `api/index.py:1453` | Firestore |
+| PUT | `/api/documents/{doc_id}/chat` | required | `api/index.py:1467` | Firestore |
+| GET | `/api/documents/{doc_id}/quiz/attempts` | required | `api/index.py:1484` | Firestore |
+| POST | `/api/documents/{doc_id}/quiz/attempts` | required | `api/index.py:1489` | Firestore |
+| POST | `/api/documents/{doc_id}/quiz/regenerate` | required | `api/index.py:1500` | Gemini, Firestore |
+| GET | `/api/documents/{doc_id}/flashcards` | required | `api/index.py:1543` | Firestore |
+| POST | `/api/documents/{doc_id}/flashcards/regenerate` | required | `api/index.py:1549` | Gemini, Firestore |
+| POST | `/api/documents/{doc_id}/summary/regenerate` | required | `api/index.py:1610` | Gemini, Firestore |
+| POST | `/api/documents/{doc_id}/podcast/regenerate` | required | `api/index.py:1652` | Gemini, Firestore |
+| GET | `/api/podcast/audio-status/{doc_id}` | required | `api/index.py:1720` | Firestore |
+| POST | `/api/podcast/episode-audio` | required | `api/index.py:2196` | Google Cloud TTS (whole episode as ONE MP3 track, on cache miss), Firestore |
+| POST | `/api/podcast/segment-audio` | required | `api/index.py:2116` | Google Cloud TTS (whole episode, 1 call) **or** Gemini TTS (≤2,250-char batches) **or** ElevenLabs (1 call/segment) — on cache miss only — plus Firestore |
 
 "Required" auth means `Depends(require_user)` — see §3.
