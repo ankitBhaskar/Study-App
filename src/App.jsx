@@ -1087,65 +1087,57 @@ function FlashcardsPanel({ documentId, authedFetch }) {
 
       {!loading && cards.length > 0 && (
         <>
-          <button
-            onClick={() => setFlipped((f) => !f)}
-            aria-label={flipped ? "Show front" : "Show back"}
-            style={{
-              display: "block",
-              width: "100%",
-              minHeight: 190,
-              margin: "16px 0 10px",
-              padding: "26px 22px",
-              borderRadius: 16,
-              border: `1.5px solid ${flipped ? amber : moss}`,
-              background: flipped ? "#fdf7ec" : "#f3f7f4",
-              cursor: "pointer",
-              textAlign: "center",
-            }}
-          >
-            <span
-              style={{
-                display: "block",
-                fontSize: 11,
-                letterSpacing: 1.2,
-                textTransform: "uppercase",
-                color: flipped ? amber : moss,
-                marginBottom: 12,
-                fontWeight: 700,
-              }}
-            >
-              {flipped ? "Back · answer" : "Front · tap to flip"}
-            </span>
-            <span
-              style={{
-                display: "block",
-                fontSize: flipped ? 16 : 20,
-                lineHeight: 1.5,
-                color: "#26332b",
-                fontWeight: flipped ? 400 : 700,
-              }}
-            >
-              {flipped ? card.back : card.front}
-            </span>
-          </button>
-
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
+          {/* key remounts the scene per card, so moving to the next card
+              fades in on its front face instead of visibly un-rotating. */}
+          <div className="fc-scene fade" key={`${setIdx}-${cardIdx}`}>
             <button
-              style={{ ...styles.audioBtn, padding: "6px 12px", opacity: cardIdx === 0 ? 0.4 : 1 }}
+              className={`fc-card ${flipped ? "flipped" : ""}`}
+              onClick={() => setFlipped((f) => !f)}
+              aria-label={flipped ? "Show the term" : "Reveal the answer"}
+            >
+              <span className="fc-face">
+                <span className="fc-kicker">Card {cardIdx + 1} of {cards.length}</span>
+                <span className="fc-term">{card.front}</span>
+                <span className="fc-hint">
+                  <RotateCcw size={11} /> Tap to reveal the answer
+                </span>
+              </span>
+              <span className="fc-face back">
+                <span className="fc-kicker">Answer</span>
+                <span className="fc-answer">{card.back}</span>
+                <span className="fc-hint">
+                  <RotateCcw size={11} /> Tap to flip back
+                </span>
+              </span>
+            </button>
+          </div>
+
+          <div className="fc-nav">
+            <button
+              className="fc-arrow"
               onClick={() => goTo(cardIdx - 1)}
               disabled={cardIdx === 0}
+              aria-label="Previous card"
             >
-              ‹ Prev
+              <ArrowRight size={17} style={{ transform: "rotate(180deg)" }} />
             </button>
-            <span style={{ fontSize: 13, color: "#6b7a70" }}>
-              Card {cardIdx + 1} / {cards.length}
-            </span>
+            <div className="fc-dots" role="tablist" aria-label="Cards">
+              {cards.map((_, i) => (
+                <button
+                  key={i}
+                  className={`fc-dot ${i === cardIdx ? "active" : ""}`}
+                  onClick={() => goTo(i)}
+                  aria-label={`Go to card ${i + 1}`}
+                />
+              ))}
+            </div>
             <button
-              style={{ ...styles.audioBtn, padding: "6px 12px", opacity: cardIdx >= cards.length - 1 ? 0.4 : 1 }}
+              className="fc-arrow"
               onClick={() => goTo(cardIdx + 1)}
               disabled={cardIdx >= cards.length - 1}
+              aria-label="Next card"
             >
-              Next ›
+              <ArrowRight size={17} />
             </button>
           </div>
 
@@ -2664,6 +2656,140 @@ button, input { -webkit-tap-highlight-color: transparent; }
 
 .fade { animation: fade .35s ease; }
 @keyframes fade { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+
+/* Flashcards — a physical index-card feel: a stacked deck behind the card,
+   a true 3D flip on tap, moss front / amber back matching the app accents. */
+.fc-scene {
+  perspective: 1200px;
+  height: clamp(220px, 32vh, 290px);
+  margin: 18px 0 14px;
+  position: relative;
+}
+/* the "rest of the deck" peeking out behind the top card */
+.fc-scene::before, .fc-scene::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 18px;
+  border: 1.5px solid ${line};
+  background: #fff;
+  z-index: 0;
+}
+.fc-scene::before { transform: rotate(-1.6deg) translateY(7px); }
+.fc-scene::after { transform: rotate(1.1deg) translateY(4px); background: ${paper}; }
+.fc-card {
+  position: relative;
+  z-index: 1;
+  width: 100%;
+  height: 100%;
+  border: none;
+  background: transparent;
+  padding: 0;
+  cursor: pointer;
+  font-family: inherit;
+  transform-style: preserve-3d;
+  transition: transform .55s cubic-bezier(.4, .2, .2, 1);
+}
+.fc-card.flipped { transform: rotateY(180deg); }
+.fc-card:focus-visible { outline: none; }
+.fc-card:focus-visible .fc-face { outline: 3px solid ${amber}; outline-offset: 3px; }
+.fc-face {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 24px 22px 34px;
+  border-radius: 18px;
+  border: 1.5px solid ${moss};
+  background: #fff;
+  box-shadow: 0 10px 24px -14px rgba(28, 37, 34, .35);
+  backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
+  overflow-y: auto;
+}
+.fc-face.back {
+  transform: rotateY(180deg);
+  border-color: ${amber};
+  background: #fdf9f0;
+}
+.fc-kicker {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 1.4px;
+  text-transform: uppercase;
+  color: ${moss};
+}
+.fc-face.back .fc-kicker { color: ${amber}; }
+.fc-term {
+  font-family: 'Fraunces', Georgia, serif;
+  font-size: clamp(22px, 4.5vw, 30px);
+  font-weight: 600;
+  line-height: 1.25;
+  color: ${ink};
+  text-align: center;
+}
+.fc-answer {
+  font-size: 15.5px;
+  line-height: 1.65;
+  color: ${ink};
+  text-align: center;
+  max-width: 52ch;
+}
+.fc-hint {
+  position: absolute;
+  bottom: 12px;
+  left: 0;
+  right: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  font-size: 11.5px;
+  color: ${muted};
+}
+.fc-nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 18px;
+}
+.fc-arrow {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  border: 1.5px solid ${line};
+  background: #fff;
+  color: ${mossDeep};
+  cursor: pointer;
+  font-family: inherit;
+  transition: border-color .15s, background .15s, opacity .15s;
+}
+.fc-arrow:hover:not(:disabled) { border-color: ${moss}; background: #f0f5f1; }
+.fc-arrow:disabled { opacity: .35; cursor: default; }
+.fc-arrow:focus-visible { outline: 3px solid ${amber}; outline-offset: 2px; }
+.fc-dots { display: flex; align-items: center; gap: 7px; }
+.fc-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: ${line};
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  transition: background .2s, width .2s;
+}
+.fc-dot.active { width: 20px; background: ${moss}; }
+.fc-dot:focus-visible { outline: 2px solid ${amber}; outline-offset: 2px; }
+@media (prefers-reduced-motion: reduce) {
+  .fc-card { transition: none; }
+}
 
 @media (min-width: 900px) {
   .panel .fade {
