@@ -2900,7 +2900,7 @@ button, input { -webkit-tap-highlight-color: transparent; }
   }
 
   .tabs {
-    gap: 0 !important;
+    gap: 4px !important;
     margin-left: -16px !important;
     margin-right: -16px !important;
     padding-left: 16px !important;
@@ -2910,12 +2910,6 @@ button, input { -webkit-tap-highlight-color: transparent; }
 
   .tabs::-webkit-scrollbar {
     display: none;
-  }
-
-  .tab {
-    gap: 4px !important;
-    padding: 10px 7px 13px !important;
-    font-size: 13px !important;
   }
 
   .tab {
