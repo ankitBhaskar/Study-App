@@ -1,7 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import {
   ArrowRight,
-  BookOpen,
   Check,
   Clock,
   FileText,
@@ -127,6 +126,22 @@ function friendlyAuthError(code) {
   }
 }
 
+// The Telos mark: a rounded moss tile with a white "T" built from plain
+// shapes (not text) so it stays crisp at favicon sizes regardless of which
+// fonts are installed, plus a small amber dot — the "telos" (end goal) a
+// learner is working toward. Used both in the app header and as the
+// browser-tab favicon (public/favicon.svg mirrors this exact design).
+function TelosMark({ size = 32 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 64 64" fill="none" aria-hidden="true">
+      <rect width="64" height="64" rx="16" fill={moss} />
+      <rect x="15" y="16" width="34" height="8" rx="3" fill="#fff" />
+      <rect x="27" y="16" width="10" height="33" rx="3" fill="#fff" />
+      <circle cx="47" cy="47" r="6" fill={amber} />
+    </svg>
+  );
+}
+
 function AuthScreen({ blockedMessage }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -148,7 +163,7 @@ function AuthScreen({ blockedMessage }) {
 
   return (
     <main className="upload-wrap" style={styles.uploadWrap}>
-      <p style={styles.eyebrow}>Upload once · study every way</p>
+      <p style={styles.eyebrow}>Learn your way.</p>
       <h1 className="hero-title" style={styles.h1}>
         Turn any document into a<br />
         <span style={styles.h1accent}>study session.</span>
@@ -381,10 +396,8 @@ export default function StudyMVP() {
         <style>{css}</style>
         <header className="app-header" style={styles.header}>
           <div style={styles.brand}>
-            <div style={styles.logoMark}>
-              <BookOpen size={18} strokeWidth={2.4} />
-            </div>
-            <span style={styles.brandName}>Marrow</span>
+            <TelosMark size={32} />
+            <span style={styles.brandName}>Telos</span>
           </div>
         </header>
         <AuthScreen blockedMessage={blockedMessage} />
@@ -397,10 +410,9 @@ export default function StudyMVP() {
       <style>{css}</style>
       <header className="app-header" style={styles.header}>
         <div style={styles.brand}>
-          <div style={styles.logoMark}>
-            <BookOpen size={18} strokeWidth={2.4} />
-          </div>
-          <span style={styles.brandName}>Marrow</span>
+          <TelosMark size={32} />
+          <span style={styles.brandName}>Telos</span>
+          <span className="brand-tagline" style={styles.brandTagline}>Learn your way.</span>
         </div>
         <div style={styles.headerRight}>
           {profile && (
@@ -450,7 +462,7 @@ function UploadScreen({ loading, onUpload, fileRef, error, history, onOpenHistor
 
   return (
     <main className="upload-wrap" style={styles.uploadWrap}>
-      <p style={styles.eyebrow}>Upload once · study every way</p>
+      <p style={styles.eyebrow}>Learn your way.</p>
       <h1 className="hero-title" style={styles.h1}>
         Turn any document into a<br />
         <span style={styles.h1accent}>study session.</span>
@@ -2014,16 +2026,14 @@ const styles = {
     alignItems: "center",
   },
   brand: { display: "flex", alignItems: "center", gap: 10 },
-  logoMark: {
-    width: 32,
-    height: 32,
-    borderRadius: 9,
-    background: moss,
-    color: "#fff",
-    display: "grid",
-    placeItems: "center",
+  brandName: { fontWeight: 700, fontSize: 19, letterSpacing: "-0.02em", fontFamily: "'Fraunces', Georgia, serif" },
+  brandTagline: {
+    fontSize: 13,
+    color: muted,
+    paddingLeft: 12,
+    marginLeft: 2,
+    borderLeft: `1px solid ${line}`,
   },
-  brandName: { fontWeight: 700, fontSize: 18, letterSpacing: "-0.02em" },
   resetBtn: {
     display: "flex",
     alignItems: "center",
@@ -2589,6 +2599,11 @@ button, input { -webkit-tap-highlight-color: transparent; }
   animation: spin .8s linear infinite;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
+
+.brand-tagline { display: none; }
+@media (min-width: 640px) {
+  .brand-tagline { display: inline; }
+}
 
 .tab {
   display: inline-flex;
