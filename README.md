@@ -13,10 +13,11 @@ A React/Vite study app that turns an uploaded PDF into a study workflow: Gemini-
 - Interactive quiz with scoring and weak-topic feedback; generate a fresh, non-repeating set of questions on demand, and every attempt is saved so past scores and answers can be reviewed later
 - Summary can be regenerated with a different length (concise/detailed) or focused on a specific topic in the document
 - Podcast player with generated transcript; regenerate the script in a different style (two-host conversation, solo narrator, or interview) at any time
-- Podcast playback defaults to the **browser's own built-in voice** (Web Speech API) — completely free, instant, no API call, no quota, works for every episode with zero setup. An optional "Generate AI-narrated audio" button still exists for higher-quality narration: it uses **Google Cloud Text-to-Speech by default** (Neural2 voice, whole episode synthesized in one fast call; needs the Cloud TTS API enabled on your Google Cloud project), with Gemini TTS (`TTS_PROVIDER=gemini`) and ElevenLabs (`TTS_PROVIDER=elevenlabs`) kept as alternatives, and only runs when explicitly tapped (never automatically) since it's a paid/quota-limited call. Once generated for a document, that AI audio is cached in Firestore and reused free on later visits
+- Podcast playback's AI-narrated audio: an explicit "Generate AI-narrated audio" button (never automatic, since it's a paid/quota-limited call) using **Google Cloud Text-to-Speech by default** (Neural2 voice, whole episode synthesized in one fast call; needs the Cloud TTS API enabled on your Google Cloud project), with Gemini TTS (`TTS_PROVIDER=gemini`) and ElevenLabs (`TTS_PROVIDER=elevenlabs`) kept as alternatives. Once generated for a document, that AI audio is cached in Firestore and reused free on later visits. The free **browser's own built-in voice** (Web Speech API) player also exists as a no-cost fallback, currently hidden behind `ENABLE_BROWSER_VOICE` (default off) while it's not a prototype priority — flip that env var to bring it back with no code change
 - Chat and summary text render markdown (bold, lists, etc.) instead of showing raw asterisks
 - Tutor chat answering questions scoped to the uploaded PDF via Gemini
 - "Try it with a sample document" demo mode that works without signing in
+- Dismissible "this is a prototype" banner with a "Give feedback" button (star rating + comment); every submission is saved to Firestore and optionally emailed via Resend (`RESEND_API_KEY` + `FEEDBACK_EMAIL_TO`)
 - Configurable Gemini model, ElevenLabs model/voices and daily usage limit via environment variables
 
 ## Project structure
@@ -70,6 +71,8 @@ In Vercel: your project → **Settings → Environment Variables**:
 - `ELEVENLABS_VOICE_HOST_A` / `ELEVENLABS_VOICE_HOST_B` — optional voice IDs for the two hosts (only used with `TTS_PROVIDER=elevenlabs`)
 - `DAILY_USAGE_LIMIT` — optional, defaults to `100`; caps document analyses, chat messages and audio-segment generations per user per day, combined
 - `ALLOWED_EMAILS` — optional, comma-separated list (e.g. `you@example.com`). Leave unset to allow any account that exists in your Firebase project; set it to lock the app to specific emails only. Enforced server-side on every request, so it applies regardless of how a Firebase account was created.
+- `ENABLE_BROWSER_VOICE` — optional, defaults to `false`; the free browser-voice podcast player is hidden while the app is an early prototype. Set to `true` to bring it back, no code change needed.
+- `RESEND_API_KEY` / `FEEDBACK_EMAIL_TO` / `FEEDBACK_EMAIL_FROM` — optional; when the first two are set, "Give feedback" submissions are also emailed via [Resend](https://resend.com) in addition to being saved in Firestore. `FEEDBACK_EMAIL_FROM` defaults to Resend's shared sandbox sender.
 
 Then **redeploy** (Deployments → ⋯ → Redeploy) — env var changes only take effect on the next deployment. Verify at `https://<your-app>.vercel.app/api/health`: `gemini_key_configured` and `firebase_configured` should be `true`, and `tts_provider` shows which podcast voice backend is active. `elevenlabs_key_configured` only needs to be `true` if you set `TTS_PROVIDER=elevenlabs`.
 
@@ -121,7 +124,8 @@ Then run the backend with `FIREBASE_PROJECT_ID=demo-study-app FIRESTORE_EMULATOR
 - `GET /api/documents/{id}` — one history document including its stored extracted text, used to re-enable Tutor chat when reopening.
 - `DELETE /api/documents/{id}` / `DELETE /api/documents` — delete one document or clear all history, including its cached audio, chat log and quiz attempts.
 - `POST /api/pdf/prepare` — extract, clean and chunk PDF text and return a Gemini-ready payload without calling Gemini. No sign-in needed.
-- `GET /api/health` — reports service status and whether Gemini, ElevenLabs and Firebase are configured, plus whether `ALLOWED_EMAILS` is restricting access.
+- `POST /api/feedback` — submit `{rating: 1-5, comment, context}` from the "Give feedback" modal. Always saved to Firestore (`feedback` collection); also emailed via Resend when `RESEND_API_KEY` + `FEEDBACK_EMAIL_TO` are set (best-effort — a missing key or a failed send never blocks the submission). Storage only, no usage-limit cost.
+- `GET /api/health` — reports service status and whether Gemini, ElevenLabs and Firebase are configured, whether `ALLOWED_EMAILS` is restricting access, and whether the free browser-voice player is enabled (`browser_voice_enabled`, driven by `ENABLE_BROWSER_VOICE`).
 
 See [API_INTEGRATIONS.md](API_INTEGRATIONS.md) for exact prompts, file/line references, and request/response shapes for every endpoint above.
 

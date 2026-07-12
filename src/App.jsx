@@ -13,9 +13,11 @@ import {
   Minus,
   Pause,
   Play,
+  MessageSquarePlus,
   RotateCcw,
   Send,
   Sparkles,
+  Star,
   TrendingDown,
   TrendingUp,
   Upload,
@@ -145,6 +147,150 @@ function TelosMark({ size = 32 }) {
   );
 }
 
+// Bump this when the banner's message changes materially — dismissing an
+// old version shouldn't silently suppress a genuinely new notice.
+const PROTOTYPE_BANNER_KEY = "telos_prototype_banner_dismissed_v1";
+
+function PrototypeBanner({ onGiveFeedback, onDismiss }) {
+  return (
+    <div style={styles.bannerBar} role="note">
+      <p style={styles.bannerText}>
+        <strong>Prototype</strong> — Telos is early and still changing. Run into something odd?
+      </p>
+      {onGiveFeedback && (
+        <button style={styles.bannerBtn} onClick={onGiveFeedback}>
+          <MessageSquarePlus size={14} /> Give feedback
+        </button>
+      )}
+      <button style={styles.bannerClose} onClick={onDismiss} aria-label="Dismiss this notice">
+        <X size={15} />
+      </button>
+    </div>
+  );
+}
+
+function FeedbackModal({ onClose, authedFetch, context }) {
+  const [rating, setRating] = useState(0);
+  const [hoverRating, setHoverRating] = useState(0);
+  const [comment, setComment] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [sent, setSent] = useState(false);
+
+  const submit = async (e) => {
+    e.preventDefault();
+    if (rating === 0) {
+      setError("Pick a star rating first.");
+      return;
+    }
+    setBusy(true);
+    setError("");
+    try {
+      const res = await authedFetch("/api/feedback", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ rating, comment, context }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => null);
+        throw new Error(data?.detail || `Could not send feedback (error ${res.status}).`);
+      }
+      setSent(true);
+    } catch (err) {
+      setError(
+        err instanceof TypeError ? "Could not reach the study service. Please try again in a moment." : err.message
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div
+      style={styles.modalOverlay}
+      onClick={onClose}
+      onKeyDown={(e) => e.key === "Escape" && onClose()}
+    >
+      <div
+        className="fade"
+        style={styles.modalCard}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="feedback-title"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+          <h3 id="feedback-title" style={{ ...styles.panelH, marginBottom: 6 }}>
+            {sent ? "Thank you." : "Give feedback"}
+          </h3>
+          <button style={styles.modalClose} onClick={onClose} aria-label="Close">
+            <X size={18} />
+          </button>
+        </div>
+
+        {sent ? (
+          <>
+            <p style={styles.resultSub}>Your feedback was sent — it goes straight to the person building this.</p>
+            <button style={styles.primaryBtn} onClick={onClose}>
+              Done
+            </button>
+          </>
+        ) : (
+          <form onSubmit={submit}>
+            <p style={{ ...styles.resultSub, margin: "0 0 14px" }}>
+              What's working, what isn't — a star rating and a line or two is plenty.
+            </p>
+            <div style={styles.starRow} role="radiogroup" aria-label="Rating out of 5 stars">
+              {[1, 2, 3, 4, 5].map((n) => {
+                const filled = n <= (hoverRating || rating);
+                return (
+                  <button
+                    key={n}
+                    type="button"
+                    style={styles.starBtn}
+                    role="radio"
+                    aria-checked={rating === n}
+                    aria-label={`${n} star${n > 1 ? "s" : ""}`}
+                    onClick={() => setRating(n)}
+                    onMouseEnter={() => setHoverRating(n)}
+                    onMouseLeave={() => setHoverRating(0)}
+                  >
+                    <Star size={26} fill={filled ? amber : "none"} stroke={filled ? amber : line} strokeWidth={1.6} />
+                  </button>
+                );
+              })}
+            </div>
+            <label htmlFor="feedback-comment" style={styles.feedbackLabel}>
+              Comments (optional)
+            </label>
+            <textarea
+              id="feedback-comment"
+              style={styles.feedbackTextarea}
+              placeholder="Anything you'd want to tell me directly…"
+              value={comment}
+              onChange={(e) => setComment(e.target.value)}
+              rows={4}
+              maxLength={2000}
+            />
+            {error && (
+              <p style={styles.errorText} role="alert">
+                {error}
+              </p>
+            )}
+            <button
+              type="submit"
+              style={{ ...styles.primaryBtn, width: "100%", justifyContent: "center", opacity: busy ? 0.6 : 1 }}
+              disabled={busy}
+            >
+              {busy ? "Sending…" : "Send feedback"}
+            </button>
+          </form>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function AuthScreen({ blockedMessage }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -224,9 +370,34 @@ export default function StudyMVP() {
   const [history, setHistory] = useState([]);
   const [profile, setProfile] = useState(null);
   const [blockedMessage, setBlockedMessage] = useState("");
+  const [showBanner, setShowBanner] = useState(
+    () => typeof window === "undefined" || localStorage.getItem(PROTOTYPE_BANNER_KEY) !== "1"
+  );
+  const [showFeedback, setShowFeedback] = useState(false);
+  // Config flags read from the backend (an env var, not a per-user
+  // setting) — e.g. whether the free browser-voice podcast player is
+  // enabled. Defaults to false/hidden until the fetch resolves.
+  const [browserVoiceEnabled, setBrowserVoiceEnabled] = useState(false);
   const fileRef = useRef(null);
 
   useEffect(() => onAuthStateChanged(auth, setUser), []);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await fetch(`${API_BASE}/api/health`);
+        const data = await res.json().catch(() => null);
+        if (res.ok && data) setBrowserVoiceEnabled(!!data.browser_voice_enabled);
+      } catch {
+        // Config fetch failed — keep the safe default (hidden).
+      }
+    })();
+  }, []);
+
+  const dismissBanner = () => {
+    setShowBanner(false);
+    localStorage.setItem(PROTOTYPE_BANNER_KEY, "1");
+  };
 
   const authedFetch = async (path, options = {}) => {
     const token = await auth.currentUser.getIdToken();
@@ -416,6 +587,7 @@ export default function StudyMVP() {
             <span style={styles.brandName}>Telos</span>
           </div>
         </header>
+        {showBanner && <PrototypeBanner onDismiss={dismissBanner} />}
         <AuthScreen blockedMessage={blockedMessage} />
       </div>
     );
@@ -463,6 +635,10 @@ export default function StudyMVP() {
         </div>
       </header>
 
+      {showBanner && (
+        <PrototypeBanner onGiveFeedback={() => setShowFeedback(true)} onDismiss={dismissBanner} />
+      )}
+
       {stage === "upload" ? (
         <UploadScreen
           loading={loading}
@@ -475,7 +651,22 @@ export default function StudyMVP() {
           onClearHistory={clearAllHistory}
         />
       ) : (
-        <StudyScreen tab={tab} setTab={setTab} fileName={fileName} doc={doc} authedFetch={authedFetch} />
+        <StudyScreen
+          tab={tab}
+          setTab={setTab}
+          fileName={fileName}
+          doc={doc}
+          authedFetch={authedFetch}
+          browserVoiceEnabled={browserVoiceEnabled}
+        />
+      )}
+
+      {showFeedback && (
+        <FeedbackModal
+          onClose={() => setShowFeedback(false)}
+          authedFetch={authedFetch}
+          context={stage === "study" ? tab : stage}
+        />
       )}
     </div>
   );
@@ -624,7 +815,7 @@ function UploadScreen({ loading, onUpload, fileRef, error, history, onOpenHistor
   );
 }
 
-function StudyScreen({ tab, setTab, fileName, doc, authedFetch }) {
+function StudyScreen({ tab, setTab, fileName, doc, authedFetch, browserVoiceEnabled }) {
   return (
     <main id="main-content" className="study-wrap" style={styles.studyWrap}>
       <div className="doc-header" style={styles.docHeader}>
@@ -656,7 +847,14 @@ function StudyScreen({ tab, setTab, fileName, doc, authedFetch }) {
         {tab === "summary" && <SummaryPanel doc={doc} documentId={doc.documentId} authedFetch={authedFetch} />}
         {tab === "quiz" && <QuizPanel doc={doc} documentId={doc.documentId} authedFetch={authedFetch} />}
         {tab === "cards" && <FlashcardsPanel documentId={doc.documentId} authedFetch={authedFetch} />}
-        {tab === "podcast" && <PodcastPanel doc={doc} documentId={doc.documentId} authedFetch={authedFetch} />}
+        {tab === "podcast" && (
+          <PodcastPanel
+            doc={doc}
+            documentId={doc.documentId}
+            authedFetch={authedFetch}
+            browserVoiceEnabled={browserVoiceEnabled}
+          />
+        )}
         {tab === "tutor" && (
           <TutorPanel
             documentContext={doc.documentContext}
@@ -1258,7 +1456,7 @@ function FlashcardsPanel({ documentId, authedFetch }) {
   );
 }
 
-function PodcastPanel({ doc, documentId, authedFetch }) {
+function PodcastPanel({ doc, documentId, authedFetch, browserVoiceEnabled }) {
   // Local copy so regenerating the script never overwrites doc.podcast —
   // same pattern QuizPanel/SummaryPanel use for their own active content.
   const [podcast, setPodcast] = useState(doc.podcast);
@@ -1294,9 +1492,13 @@ function PodcastPanel({ doc, documentId, authedFetch }) {
   const episodeUrlRef = useRef(null);
 
   // Free playback via the browser's built-in voices (Web Speech API) — no
-  // backend call, no API cost, no quota, so this is always available and
-  // never errors the way the paid AI-audio generation below can.
-  const speechSupported = typeof window !== "undefined" && "speechSynthesis" in window;
+  // backend call, no API cost, no quota, so this would always be available
+  // and never error the way the paid AI-audio generation below can. Gated
+  // behind browserVoiceEnabled (an env-var-driven config flag, see
+  // ENABLE_BROWSER_VOICE in api/index.py) — hidden for now, flip the env
+  // var when it's wanted back, no code change required.
+  const speechSupported =
+    browserVoiceEnabled && typeof window !== "undefined" && "speechSynthesis" in window;
   const [browserPlaying, setBrowserPlaying] = useState(false);
   const [browserIdx, setBrowserIdx] = useState(0);
   const browserVoicesRef = useRef({ a: null, b: null });
@@ -2200,6 +2402,98 @@ const styles = {
     borderRadius: 10,
     padding: "10px 16px",
   },
+  bannerBar: {
+    width: "min(1200px, calc(100vw - 56px))",
+    margin: "0 auto 20px",
+    display: "flex",
+    alignItems: "center",
+    flexWrap: "wrap",
+    gap: "8px 14px",
+    background: "#fbeede",
+    border: `1px solid #f0d9b8`,
+    borderRadius: 12,
+    padding: "10px 16px",
+  },
+  bannerText: { flex: "1 1 240px", margin: 0, fontSize: 13.5, lineHeight: 1.5, color: amberText },
+  bannerBtn: {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 6,
+    background: "#fff",
+    border: `1.5px solid ${moss}`,
+    color: mossDeep,
+    borderRadius: 10,
+    padding: "7px 13px",
+    fontSize: 13,
+    fontWeight: 600,
+    cursor: "pointer",
+    fontFamily: "inherit",
+    whiteSpace: "nowrap",
+  },
+  bannerClose: {
+    display: "grid",
+    placeItems: "center",
+    background: "none",
+    border: "none",
+    color: amberText,
+    cursor: "pointer",
+    padding: 4,
+    borderRadius: 6,
+    flexShrink: 0,
+  },
+  modalOverlay: {
+    position: "fixed",
+    inset: 0,
+    background: "rgba(28, 37, 34, 0.45)",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 20,
+    zIndex: 200,
+  },
+  modalCard: {
+    width: "min(440px, 100%)",
+    maxHeight: "calc(100svh - 40px)",
+    overflowY: "auto",
+    background: "#fff",
+    border: `1px solid ${line}`,
+    borderRadius: 18,
+    padding: "28px 26px",
+  },
+  modalClose: {
+    display: "grid",
+    placeItems: "center",
+    background: "none",
+    border: "none",
+    color: muted,
+    cursor: "pointer",
+    padding: 4,
+    borderRadius: 6,
+    marginTop: -4,
+    marginRight: -6,
+    flexShrink: 0,
+  },
+  starRow: { display: "flex", gap: 4, marginBottom: 18 },
+  starBtn: {
+    display: "grid",
+    placeItems: "center",
+    background: "none",
+    border: "none",
+    padding: 4,
+    cursor: "pointer",
+  },
+  feedbackLabel: { display: "block", fontSize: 13, fontWeight: 600, color: ink, marginBottom: 6 },
+  feedbackTextarea: {
+    display: "block",
+    width: "100%",
+    border: `1px solid ${line}`,
+    borderRadius: 10,
+    padding: "12px 14px",
+    fontSize: 14.5,
+    fontFamily: "inherit",
+    resize: "vertical",
+    marginBottom: 14,
+  },
   authForm: {
     marginTop: 28,
     width: "min(360px, 100%)",
@@ -2670,6 +2964,7 @@ button, input { -webkit-tap-highlight-color: transparent; }
 button:focus-visible,
 a:focus-visible,
 input:focus-visible,
+textarea:focus-visible,
 [role="button"]:focus-visible,
 [tabindex]:focus-visible {
   outline: 3px solid ${amberText};

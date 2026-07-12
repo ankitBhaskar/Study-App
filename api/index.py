@@ -123,6 +123,17 @@ DAILY_USAGE_LIMIT = int(os.getenv("DAILY_USAGE_LIMIT", "100"))
 # Comma-separated allowlist of emails permitted to use the app. Empty means
 # unrestricted — set this to lock the app down to specific accounts.
 ALLOWED_EMAILS = {e.strip().lower() for e in os.getenv("ALLOWED_EMAILS", "").split(",") if e.strip()}
+# Free "Play episode — your device's voice" (Web Speech API) button is
+# hidden by default while it's not a priority for the current prototype;
+# flip ENABLE_BROWSER_VOICE=true (no code change, just an env var + redeploy)
+# to bring it back. The frontend reads this from /api/health.
+ENABLE_BROWSER_VOICE = os.getenv("ENABLE_BROWSER_VOICE", "false").strip().lower() == "true"
+# Where "Give feedback" submissions get emailed. Feedback is always saved to
+# Firestore regardless; email is best-effort and skipped if RESEND_API_KEY
+# isn't set.
+RESEND_API_KEY = os.getenv("RESEND_API_KEY")
+FEEDBACK_EMAIL_TO = os.getenv("FEEDBACK_EMAIL_TO")
+FEEDBACK_EMAIL_FROM = os.getenv("FEEDBACK_EMAIL_FROM", "Telos Feedback <onboarding@resend.dev>")
 
 app = FastAPI(
     title=APP_NAME,
@@ -327,6 +338,19 @@ class AuthedUser(BaseModel):
     email: str | None = None
 
 
+class FeedbackRequest(BaseModel):
+    rating: int
+    comment: str = ""
+    # Which screen the feedback was given from, e.g. "summary"/"podcast" —
+    # purely contextual, never trusted for anything beyond display.
+    context: str = ""
+
+
+class FeedbackResponse(BaseModel):
+    ok: bool
+    emailed: bool
+
+
 class ProfileResponse(BaseModel):
     uid: str
     email: str | None
@@ -367,6 +391,43 @@ def get_google_tts_api_key() -> str | None:
 
 def get_elevenlabs_api_key() -> str | None:
     return os.getenv("ELEVENLABS_API_KEY")
+
+
+async def send_feedback_email(rating: int, comment: str, context: str, from_email: str | None) -> bool:
+    """Best-effort email notification for a feedback submission via Resend
+    (https://resend.com — a single HTTP call, no SMTP setup). Returns False
+    (never raises) if RESEND_API_KEY/FEEDBACK_EMAIL_TO aren't configured or
+    the request fails — feedback is always saved to Firestore regardless, so
+    a misconfigured or down email service never blocks the submission."""
+    if not RESEND_API_KEY or not FEEDBACK_EMAIL_TO:
+        return False
+
+    stars = "★" * rating + "☆" * (5 - rating)
+    lines = [
+        f"Rating: {stars} ({rating}/5)",
+        f"From: {from_email or 'unknown user'}",
+    ]
+    if context:
+        lines.append(f"Screen: {context}")
+    lines.append("")
+    lines.append(comment or "(no comment)")
+    text_body = "\n".join(lines)
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.post(
+                "https://api.resend.com/emails",
+                headers={"Authorization": f"Bearer {RESEND_API_KEY}"},
+                json={
+                    "from": FEEDBACK_EMAIL_FROM,
+                    "to": [FEEDBACK_EMAIL_TO],
+                    "subject": f"Telos feedback: {stars} ({rating}/5)",
+                    "text": text_body,
+                },
+            )
+        return response.status_code < 300
+    except httpx.HTTPError:
+        return False
 
 
 _cached_voice_ids: tuple[str, str] | None = None
@@ -1210,6 +1271,7 @@ def health() -> dict[str, Any]:
         "firebase_configured": firebase_configured(),
         "daily_usage_limit": DAILY_USAGE_LIMIT,
         "access_restricted": bool(ALLOWED_EMAILS),
+        "browser_voice_enabled": ENABLE_BROWSER_VOICE,
     }
 
 
@@ -1234,6 +1296,30 @@ async def get_profile(user: AuthedUser = Depends(require_user)) -> ProfileRespon
         usage_today=usage_today,
         daily_limit=DAILY_USAGE_LIMIT,
     )
+
+
+@app.post("/api/feedback", response_model=FeedbackResponse)
+async def submit_feedback(request: FeedbackRequest, user: AuthedUser = Depends(require_user)) -> FeedbackResponse:
+    if request.rating < 1 or request.rating > 5:
+        raise HTTPException(status_code=400, detail="Rating must be between 1 and 5.")
+    comment = request.comment.strip()[:2000]
+    context = request.context.strip()[:100]
+
+    db = get_firestore_client()
+    if db is not None:
+        db.collection("feedback").add(
+            {
+                "uid": user.uid,
+                "email": user.email,
+                "rating": request.rating,
+                "comment": comment,
+                "context": context,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+
+    emailed = await send_feedback_email(request.rating, comment, context, user.email)
+    return FeedbackResponse(ok=True, emailed=emailed)
 
 
 @app.get("/api/documents", response_model=DocumentListResponse)
