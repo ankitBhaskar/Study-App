@@ -32,6 +32,8 @@ or style-key names to find every usage.
 | Error | `#b03d2e` on `#fdeeea` bg, `#f2cfc5` border | Error messages, failed states |
 | Weak-topic chip | `#fbeede` bg / `amberText` text / `#f0d9b8` border | Quiz "topics to review" |
 | "Current" tag | `#dcebe2` bg / `mossDeep` text | Active regenerate-option indicator |
+| Notice banner | `#fbeede` bg / `amberText` text / `#f0d9b8` border | Prototype banner — same tokens as the weak-topic chip, deliberately, so "notice" reads consistently |
+| Modal scrim | `rgba(28, 37, 34, 0.45)` (`ink` at 45%) | Overlay behind a modal card |
 
 **Rule**: `moss` and `amber` are for icons, borders, large display type
 (≥18.66px bold or ≥24px regular) and backgrounds only. Any *small* text
@@ -215,12 +217,56 @@ not elevation.
 - The scrolling message list is `role="log" aria-live="polite"` so new
   tutor replies are announced.
 
+### Banners
+
+- **Prototype banner** (`bannerBar`): the one banner in the product today.
+  Amber-tint notice style — `#fbeede` fill, `#f0d9b8` border, `amberText`
+  text — same palette as the weak-topic chip, so "notice" reads
+  consistently everywhere it appears. 12px radius, sits directly under the
+  header, `1200px`-max content width to match the header/panel measure.
+  Dismissible (X button, right-aligned); dismissal is remembered in
+  `localStorage` under a versioned key (`telos_prototype_banner_dismissed_v1`)
+  — bump the version suffix when the message changes materially so a stale
+  dismissal doesn't silently hide a genuinely new notice.
+
+### Modals
+
+- **Overlay** (`modalOverlay`): `position: fixed`, full viewport, `ink` at
+  45% opacity (`rgba(28, 37, 34, 0.45)`) as the scrim — no blur. Click on
+  the overlay (outside the card) closes; click inside the card does not
+  (`stopPropagation`).
+- **Card** (`modalCard`): `#fff` fill, `1px solid line` border, **18px**
+  radius (Panel-tier, see Border Radius table), `28px 26px` padding, no
+  shadow — same "depth via border, not blur" rule as everything else.
+  Max width `440px`, scrolls internally past `100svh - 40px` tall.
+  Entrance uses the existing `.fade` animation, nothing modal-specific.
+- **Header row**: `panelH` title (Fraunces 20px/600) + a ghost icon-only
+  close button (`modalClose`, `muted` color, no border, 18px `X` icon).
+- **Focus/dismiss**: `Escape` closes (handled on the overlay's
+  `onKeyDown`); the close button and every interactive element inside use
+  the standard button/input specs above, so the global focus-visible
+  fallback applies with no extra rules needed (this is also why
+  `textarea:focus-visible` was added to that fallback selector — the
+  feedback form's comment box is the first `<textarea>` in the app).
+- **Current instance**: the feedback modal (rating + comment). Reuses
+  `primaryBtn` for submit and `resultSub` for helper text — no new button
+  variant was needed.
+
+### Star rating
+
+- Five icon-only buttons (`starBtn`, `Star` from lucide), no border/fill on
+  the button itself — just the icon. Selected/hovered stars fill `amber`
+  (icons are explicitly amber-safe per the Colors rule above, since the
+  restriction is on *text*, not icon fills); unfilled stars are an outline
+  in `line`. `role="radiogroup"` / `role="radio"` + `aria-checked`, since
+  this is a single-choice control, not a checkbox group.
+
 ### Not yet in the product
 
-Checkboxes, native radio inputs, tooltips, and modals don't exist in
-Telos today — don't invent specs for components that aren't built. If one
-of these gets added, extend this file with a real section following the
-same format (state table + notes), not a guess.
+Checkboxes, native radio inputs, and tooltips don't exist in Telos today —
+don't invent specs for components that aren't built. If one of these gets
+added, extend this file with a real section following the same format
+(state table + notes), not a guess.
 
 ---
 
