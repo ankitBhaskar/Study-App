@@ -492,7 +492,8 @@ function formatHistoryDate(iso) {
 // Real, honest trend from the documents already loaded into history — no
 // fabricated numbers. Counts study sessions (documents opened/analyzed) in
 // the last 7 days against the 7 days before that. Returns null when there's
-// nothing meaningful to show yet (no activity in either window).
+// no activity yet this week — a 0-count badge with a down arrow would read
+// as a guilt trip, not a neutral stat, so it's better to show nothing.
 const DAY_MS = 24 * 60 * 60 * 1000;
 function weeklyStudyTrend(history) {
   if (!history || history.length === 0) return null;
@@ -505,7 +506,7 @@ function weeklyStudyTrend(history) {
     if (age >= 0 && age < 7 * DAY_MS) thisWeek++;
     else if (age >= 7 * DAY_MS && age < 14 * DAY_MS) lastWeek++;
   }
-  if (thisWeek === 0 && lastWeek === 0) return null;
+  if (thisWeek === 0) return null;
   const delta = thisWeek - lastWeek;
   return { thisWeek, delta };
 }
@@ -2082,6 +2083,20 @@ const line = "#e2ded3";
 const muted = "#5a6560";
 const amberText = "#8f5a0f";
 
+// Shared shape for the small pill badges in the header (usage + trend) —
+// defined outside `styles` since a property can't reference the `styles`
+// object it's still being assigned to.
+const pillBadge = {
+  fontSize: 12,
+  color: muted,
+  background: "#fff",
+  border: `1px solid ${line}`,
+  borderRadius: 20,
+  padding: "5px 12px",
+  fontVariantNumeric: "tabular-nums",
+  whiteSpace: "nowrap",
+};
+
 const styles = {
   app: {
     minHeight: "100svh",
@@ -2214,28 +2229,8 @@ const styles = {
     textAlign: "center",
   },
   headerRight: { display: "flex", alignItems: "center", gap: 10 },
-  usageBadge: {
-    fontSize: 12,
-    color: muted,
-    background: "#fff",
-    border: `1px solid ${line}`,
-    borderRadius: 20,
-    padding: "5px 12px",
-    fontVariantNumeric: "tabular-nums",
-    whiteSpace: "nowrap",
-  },
-  trendBadge: {
-    alignItems: "center",
-    gap: 5,
-    fontSize: 12,
-    fontWeight: 600,
-    background: "#fff",
-    border: `1px solid ${line}`,
-    borderRadius: 20,
-    padding: "5px 12px",
-    fontVariantNumeric: "tabular-nums",
-    whiteSpace: "nowrap",
-  },
+  usageBadge: { ...pillBadge },
+  trendBadge: { ...pillBadge, alignItems: "center", gap: 5, fontWeight: 600 },
   sampleBtn: {
     marginTop: 22,
     display: "inline-flex",
