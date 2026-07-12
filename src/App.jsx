@@ -10,11 +10,14 @@ import {
   ListChecks,
   LogOut,
   MessageCircle,
+  Minus,
   Pause,
   Play,
   RotateCcw,
   Send,
   Sparkles,
+  TrendingDown,
+  TrendingUp,
   Upload,
   X,
 } from "lucide-react";
@@ -162,7 +165,7 @@ function AuthScreen({ blockedMessage }) {
   };
 
   return (
-    <main className="upload-wrap" style={styles.uploadWrap}>
+    <main id="main-content" className="upload-wrap" style={styles.uploadWrap}>
       <p style={styles.eyebrow}>Learn your way.</p>
       <h1 className="hero-title" style={styles.h1}>
         Turn any document into a<br />
@@ -178,6 +181,7 @@ function AuthScreen({ blockedMessage }) {
           type="email"
           required
           placeholder="Email"
+          aria-label="Email"
           autoComplete="email"
           value={email}
           onChange={(e) => setEmail(e.target.value)}
@@ -188,11 +192,14 @@ function AuthScreen({ blockedMessage }) {
           required
           minLength={6}
           placeholder="Password"
+          aria-label="Password"
           autoComplete="current-password"
           value={password}
           onChange={(e) => setPassword(e.target.value)}
         />
-        {(error || blockedMessage) && <p style={styles.errorText}>{error || blockedMessage}</p>}
+        {(error || blockedMessage) && (
+          <p style={styles.errorText} role="alert">{error || blockedMessage}</p>
+        )}
         <button
           type="submit"
           style={{ ...styles.primaryBtn, width: "100%", justifyContent: "center", opacity: busy ? 0.6 : 1 }}
@@ -379,12 +386,20 @@ export default function StudyMVP() {
     }
   };
 
+  const trend = weeklyStudyTrend(history);
+
   if (user === undefined) {
     return (
       <div className="app-shell" style={styles.app}>
         <style>{css}</style>
-        <main style={{ ...styles.uploadWrap, alignItems: "center", justifyContent: "center" }}>
-          <div className="spinner" />
+        <main
+          id="main-content"
+          style={{ ...styles.uploadWrap, alignItems: "center", justifyContent: "center" }}
+          role="status"
+          aria-live="polite"
+          aria-label="Checking your session"
+        >
+          <div className="spinner" aria-hidden="true" />
         </main>
       </div>
     );
@@ -394,6 +409,7 @@ export default function StudyMVP() {
     return (
       <div className="app-shell" style={styles.app}>
         <style>{css}</style>
+        <a href="#main-content" className="skip-link">Skip to content</a>
         <header className="app-header" style={styles.header}>
           <div style={styles.brand}>
             <TelosMark size={32} />
@@ -408,6 +424,7 @@ export default function StudyMVP() {
   return (
     <div className="app-shell" style={styles.app}>
       <style>{css}</style>
+      <a href="#main-content" className="skip-link">Skip to content</a>
       <header className="app-header" style={styles.header}>
         <div style={styles.brand}>
           <TelosMark size={32} />
@@ -415,6 +432,21 @@ export default function StudyMVP() {
           <span className="brand-tagline" style={styles.brandTagline}>Learn your way.</span>
         </div>
         <div style={styles.headerRight}>
+          {trend && (
+            <span
+              className="trend-badge"
+              style={{ ...styles.trendBadge, color: trend.delta < 0 ? muted : mossDeep }}
+            >
+              {trend.delta > 0 ? (
+                <TrendingUp size={13} aria-hidden="true" />
+              ) : trend.delta < 0 ? (
+                <TrendingDown size={13} aria-hidden="true" />
+              ) : (
+                <Minus size={13} aria-hidden="true" />
+              )}
+              {trend.thisWeek} {trend.thisWeek === 1 ? "session" : "sessions"} this week
+            </span>
+          )}
           {profile && (
             <span style={styles.usageBadge}>
               {profile.usage_today}/{profile.daily_limit} today
@@ -457,11 +489,33 @@ function formatHistoryDate(iso) {
     : d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
+// Real, honest trend from the documents already loaded into history — no
+// fabricated numbers. Counts study sessions (documents opened/analyzed) in
+// the last 7 days against the 7 days before that. Returns null when there's
+// no activity yet this week — a 0-count badge with a down arrow would read
+// as a guilt trip, not a neutral stat, so it's better to show nothing.
+const DAY_MS = 24 * 60 * 60 * 1000;
+function weeklyStudyTrend(history) {
+  if (!history || history.length === 0) return null;
+  const now = Date.now();
+  let thisWeek = 0;
+  let lastWeek = 0;
+  for (const entry of history) {
+    const age = now - new Date(entry.created_at).getTime();
+    if (Number.isNaN(age)) continue;
+    if (age >= 0 && age < 7 * DAY_MS) thisWeek++;
+    else if (age >= 7 * DAY_MS && age < 14 * DAY_MS) lastWeek++;
+  }
+  if (thisWeek === 0) return null;
+  const delta = thisWeek - lastWeek;
+  return { thisWeek, delta };
+}
+
 function UploadScreen({ loading, onUpload, fileRef, error, history, onOpenHistory, onDeleteHistory, onClearHistory }) {
   const [drag, setDrag] = useState(false);
 
   return (
-    <main className="upload-wrap" style={styles.uploadWrap}>
+    <main id="main-content" className="upload-wrap" style={styles.uploadWrap}>
       <p style={styles.eyebrow}>Learn your way.</p>
       <h1 className="hero-title" style={styles.h1}>
         Turn any document into a<br />
@@ -486,8 +540,16 @@ function UploadScreen({ loading, onUpload, fileRef, error, history, onOpenHistor
           if (f) onUpload(f);
         }}
         onClick={() => !loading && fileRef.current?.click()}
+        onKeyDown={(e) => {
+          if (loading) return;
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            fileRef.current?.click();
+          }
+        }}
         role="button"
         tabIndex={0}
+        aria-label="Drop a PDF here or click to browse, max file size 4 MB"
       >
         <input
           ref={fileRef}
@@ -501,8 +563,8 @@ function UploadScreen({ loading, onUpload, fileRef, error, history, onOpenHistor
           }}
         />
         {loading ? (
-          <div style={styles.loadingBox}>
-            <div className="spinner" />
+          <div style={styles.loadingBox} role="status" aria-live="polite">
+            <div className="spinner" aria-hidden="true" />
             <p style={styles.loadingText}>Reading your document…</p>
             <p style={styles.loadingSub}>Generating summary & quiz</p>
           </div>
@@ -518,7 +580,7 @@ function UploadScreen({ loading, onUpload, fileRef, error, history, onOpenHistor
         )}
       </div>
 
-      {!loading && error && <p style={styles.errorText}>{error}</p>}
+      {!loading && error && <p style={styles.errorText} role="alert">{error}</p>}
 
       {!loading && (
         <button style={styles.sampleBtn} onClick={() => onUpload(null)}>
@@ -564,7 +626,7 @@ function UploadScreen({ loading, onUpload, fileRef, error, history, onOpenHistor
 
 function StudyScreen({ tab, setTab, fileName, doc, authedFetch }) {
   return (
-    <main className="study-wrap" style={styles.studyWrap}>
+    <main id="main-content" className="study-wrap" style={styles.studyWrap}>
       <div className="doc-header" style={styles.docHeader}>
         <div style={styles.docChip}>
           <FileText size={14} />
@@ -637,7 +699,7 @@ function RegenActions({ heading, options, activeId, busyId, disabled, onPick, sa
               disabled={disabled}
             >
               {isBusy ? (
-                <span className="spinner" style={{ width: 13, height: 13, borderWidth: 2 }} />
+                <span className="spinner" style={{ width: 13, height: 13, borderWidth: 2 }} aria-hidden="true" />
               ) : isCurrent ? (
                 <Check size={14} strokeWidth={2.6} />
               ) : isSaved ? (
@@ -739,6 +801,7 @@ function SummaryPanel({ doc, documentId, authedFetch }) {
               <input
                 style={styles.focusInput}
                 placeholder="e.g. maturity benefits, Option 2"
+                aria-label="Focus topic to summarize"
                 value={focus}
                 onChange={(e) => setFocus(e.target.value)}
                 maxLength={200}
@@ -750,7 +813,7 @@ function SummaryPanel({ doc, documentId, authedFetch }) {
                 disabled={!!busyWith || !focus.trim()}
               >
                 {busyWith === "focus" ? (
-                  <span className="spinner" style={{ width: 14, height: 14, borderWidth: 2 }} />
+                  <span className="spinner" style={{ width: 14, height: 14, borderWidth: 2 }} aria-hidden="true" />
                 ) : (
                   <Sparkles size={15} />
                 )}
@@ -899,12 +962,12 @@ function QuizPanel({ doc, documentId, authedFetch }) {
           </button>
           {documentId && (
             <button style={{ ...styles.audioBtn, opacity: regenerating ? 0.6 : 1 }} onClick={regenerate} disabled={regenerating}>
-              {regenerating ? <span className="spinner" style={{ width: 14, height: 14, borderWidth: 2 }} /> : <Sparkles size={14} />}
+              {regenerating ? <span className="spinner" style={{ width: 14, height: 14, borderWidth: 2 }} aria-hidden="true" /> : <Sparkles size={14} />}
               {regenerating ? "Generating…" : "New questions"}
             </button>
           )}
         </div>
-        {regenError && <p style={{ ...styles.resultSub, color: "#b03d2e" }}>{regenError}</p>}
+        {regenError && <p style={{ ...styles.resultSub, color: "#b03d2e" }} role="alert">{regenError}</p>}
         {historySection}
       </div>
     );
@@ -1076,7 +1139,7 @@ function FlashcardsPanel({ documentId, authedFetch }) {
 
       {loading && (
         <p style={styles.resultSub}>
-          <span className="spinner" style={{ width: 14, height: 14, borderWidth: 2, marginRight: 8 }} />
+          <span className="spinner" style={{ width: 14, height: 14, borderWidth: 2, marginRight: 8 }} aria-hidden="true" />
           Loading saved sets…
         </p>
       )}
@@ -1088,7 +1151,7 @@ function FlashcardsPanel({ documentId, authedFetch }) {
           </p>
           <button style={{ ...styles.audioBtn, opacity: busy ? 0.6 : 1 }} onClick={generate} disabled={busy}>
             {busy ? (
-              <span className="spinner" style={{ width: 14, height: 14, borderWidth: 2 }} />
+              <span className="spinner" style={{ width: 14, height: 14, borderWidth: 2 }} aria-hidden="true" />
             ) : (
               <Sparkles size={15} />
             )}
@@ -1158,7 +1221,7 @@ function FlashcardsPanel({ documentId, authedFetch }) {
               <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
                 <button style={{ ...styles.audioBtn, opacity: busy ? 0.6 : 1 }} onClick={generate} disabled={busy}>
                   {busy ? (
-                    <span className="spinner" style={{ width: 14, height: 14, borderWidth: 2 }} />
+                    <span className="spinner" style={{ width: 14, height: 14, borderWidth: 2 }} aria-hidden="true" />
                   ) : (
                     <Sparkles size={15} />
                   )}
@@ -1753,8 +1816,12 @@ function PodcastPanel({ doc, documentId, authedFetch }) {
             onPick={(id) => regenerateScript(id)}
             savedIds={savedStyles}
           />
-          {scriptBusy && <p style={styles.regenStatus}>Writing a new script…</p>}
-          {scriptError && <p style={{ ...styles.resultSub, margin: "12px 0 0", color: "#b03d2e" }}>{scriptError}</p>}
+          {scriptBusy && (
+            <p style={styles.regenStatus} role="status" aria-live="polite">Writing a new script…</p>
+          )}
+          {scriptError && (
+            <p style={{ ...styles.resultSub, margin: "12px 0 0", color: "#b03d2e" }} role="alert">{scriptError}</p>
+          )}
         </div>
       )}
 
@@ -1785,8 +1852,8 @@ function PodcastPanel({ doc, documentId, authedFetch }) {
           </button>
         )}
         {audioState === "generating" && (
-          <span style={styles.audioStatus}>
-            <span className="spinner" style={{ width: 16, height: 16, borderWidth: 2 }} />
+          <span style={styles.audioStatus} role="status" aria-live="polite">
+            <span className="spinner" style={{ width: 16, height: 16, borderWidth: 2 }} aria-hidden="true" />
             {/* Episode-track generation is one request with no per-segment
                 progress to count; the counter only applies to the
                 per-segment fallback providers. */}
@@ -1794,7 +1861,7 @@ function PodcastPanel({ doc, documentId, authedFetch }) {
           </span>
         )}
         {audioState === "error" && (
-          <span style={{ ...styles.audioStatus, color: "#b03d2e" }}>
+          <span style={{ ...styles.audioStatus, color: "#b03d2e" }} role="alert">
             {audioError}{" "}
             <button style={styles.audioRetry} onClick={generateAudio}>Retry</button>
           </span>
@@ -1970,7 +2037,7 @@ function TutorPanel({ documentContext, documentId, docFileName, fromHistory, aut
 
   return (
     <div className="fade tutor-wrap" style={styles.tutorWrap}>
-      <div style={styles.chatScroll}>
+      <div style={styles.chatScroll} role="log" aria-live="polite" aria-label="Tutor conversation">
         {msgs.map((m, i) => (
           <div
             key={i}
@@ -1990,6 +2057,7 @@ function TutorPanel({ documentContext, documentId, docFileName, fromHistory, aut
         <input
           style={styles.chatInput}
           placeholder="Ask about your document…"
+          aria-label="Ask the tutor about your document"
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && send()}
@@ -2008,14 +2076,35 @@ const moss = "#3f7d5e";
 const mossDeep = "#2e5d45";
 const amber = "#e6a23c";
 const line = "#e2ded3";
-const muted = "#6f7a73";
+// muted and amberText are darker than their "moss"/"amber" siblings on
+// purpose: those two are reserved for icons, borders and large display type,
+// while muted/amberText carry small body/label text and need the extra
+// contrast to clear WCAG AA (4.5:1) at 11-14px sizes.
+const muted = "#5a6560";
+const amberText = "#8f5a0f";
+
+// Shared shape for the small pill badges in the header (usage + trend) —
+// defined outside `styles` since a property can't reference the `styles`
+// object it's still being assigned to.
+const pillBadge = {
+  fontSize: 12,
+  color: muted,
+  background: "#fff",
+  border: `1px solid ${line}`,
+  borderRadius: 20,
+  padding: "5px 12px",
+  fontVariantNumeric: "tabular-nums",
+  whiteSpace: "nowrap",
+};
 
 const styles = {
   app: {
     minHeight: "100svh",
     background: paper,
     color: ink,
-    fontFamily: "'Inter', system-ui, sans-serif",
+    fontFamily: "'Source Sans 3', sans-serif",
+    fontSize: 16,
+    lineHeight: 1.6,
   },
   header: {
     width: "min(1200px, calc(100vw - 56px))",
@@ -2063,7 +2152,7 @@ const styles = {
     letterSpacing: "0.16em",
     fontSize: 11.5,
     fontWeight: 600,
-    color: moss,
+    color: mossDeep,
     margin: "0 0 18px",
   },
   h1: {
@@ -2140,16 +2229,8 @@ const styles = {
     textAlign: "center",
   },
   headerRight: { display: "flex", alignItems: "center", gap: 10 },
-  usageBadge: {
-    fontSize: 12,
-    color: muted,
-    background: "#fff",
-    border: `1px solid ${line}`,
-    borderRadius: 20,
-    padding: "5px 12px",
-    fontVariantNumeric: "tabular-nums",
-    whiteSpace: "nowrap",
-  },
+  usageBadge: { ...pillBadge },
+  trendBadge: { ...pillBadge, alignItems: "center", gap: 5, fontWeight: 600 },
   sampleBtn: {
     marginTop: 22,
     display: "inline-flex",
@@ -2228,7 +2309,7 @@ const styles = {
     border: "none",
     color: muted,
     cursor: "pointer",
-    padding: 4,
+    padding: 7,
     display: "grid",
     placeItems: "center",
     flexShrink: 0,
@@ -2311,7 +2392,7 @@ const styles = {
     fontWeight: 700,
     letterSpacing: 0.4,
     textTransform: "uppercase",
-    color: moss,
+    color: mossDeep,
     background: "#dcebe2",
     borderRadius: 5,
     padding: "1px 5px",
@@ -2348,7 +2429,7 @@ const styles = {
   },
   qBlock: { marginBottom: 24 },
   qText: { fontSize: 15.5, fontWeight: 500, lineHeight: 1.5, margin: "0 0 12px", display: "flex", gap: 10 },
-  qIndex: { color: amber, fontWeight: 700, fontSize: 13, marginTop: 2 },
+  qIndex: { color: amberText, fontWeight: 700, fontSize: 13, marginTop: 2 },
   options: { display: "grid", gap: 8 },
   primaryBtn: {
     marginTop: 8,
@@ -2382,7 +2463,7 @@ const styles = {
   weakRow: { display: "flex", flexWrap: "wrap", gap: 8, justifyContent: "center", marginBottom: 14 },
   weakChip: {
     background: "#fbeede",
-    color: "#a96a14",
+    color: amberText,
     border: "1px solid #f0d9b8",
     borderRadius: 20,
     padding: "5px 14px",
@@ -2452,7 +2533,7 @@ const styles = {
     letterSpacing: "0.12em",
     fontSize: 11,
     fontWeight: 600,
-    color: amber,
+    color: amberText,
     margin: "0 0 6px",
   },
   podTitle: {
@@ -2538,7 +2619,7 @@ const styles = {
     marginTop: 8,
     fontVariantNumeric: "tabular-nums",
   },
-  freeTag: { color: moss, fontWeight: 600 },
+  freeTag: { color: mossDeep, fontWeight: 600 },
   transcript: { borderTop: `1px solid ${line}`, paddingTop: 18 },
   transcriptLabel: {
     textTransform: "uppercase",
@@ -2561,12 +2642,39 @@ const styles = {
 };
 
 const css = `
-@import url('https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400..600;1,9..144,400..600&family=Inter:wght@400;500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400..600;1,9..144,400..600&family=Source+Sans+3:wght@400;500;600;700&display=swap');
 
 * { box-sizing: border-box; }
 html, body, #root { min-height: 100%; }
 body { margin: 0; overflow-x: hidden; }
 button, input { -webkit-tap-highlight-color: transparent; }
+
+.skip-link {
+  position: absolute;
+  top: -48px;
+  left: 12px;
+  z-index: 100;
+  background: ${ink};
+  color: #fff;
+  padding: 10px 16px;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  text-decoration: none;
+  transition: top .15s;
+}
+.skip-link:focus { top: 12px; }
+
+/* Fallback focus ring for every interactive control that doesn't already
+   define its own :focus-visible treatment above/below. */
+button:focus-visible,
+a:focus-visible,
+input:focus-visible,
+[role="button"]:focus-visible,
+[tabindex]:focus-visible {
+  outline: 3px solid ${amberText};
+  outline-offset: 2px;
+}
 
 .app-shell {
   width: 100%;
@@ -2589,7 +2697,7 @@ button, input { -webkit-tap-highlight-color: transparent; }
 .dropzone:hover { border-color: ${moss}; transform: translateY(-2px); }
 .dropzone.drag { border-color: ${moss}; background: #f0f5f1; }
 .dropzone.loading { cursor: default; border-style: solid; }
-.dropzone:focus-visible { outline: 3px solid ${amber}; outline-offset: 3px; }
+.dropzone:focus-visible { outline: 3px solid ${amberText}; outline-offset: 3px; }
 
 .spinner {
   width: 34px; height: 34px;
@@ -2603,6 +2711,11 @@ button, input { -webkit-tap-highlight-color: transparent; }
 .brand-tagline { display: none; }
 @media (min-width: 640px) {
   .brand-tagline { display: inline; }
+}
+
+.trend-badge { display: none; }
+@media (min-width: 760px) {
+  .trend-badge { display: inline-flex; }
 }
 
 .tab {
@@ -2652,8 +2765,8 @@ button, input { -webkit-tap-highlight-color: transparent; }
   transition: all .15s;
 }
 .opt.picked { border-color: ${moss}; background: #f0f5f1; }
-.opt.picked .optDot { border-color: ${moss}; background: ${moss}; box-shadow: inset 0 0 0 3px #f0f5f1; }
-.opt:focus-visible { outline: 3px solid ${amber}; outline-offset: 2px; }
+.opt.picked .optDot { border-color: ${moss}; background: ${moss}; outline: 3px solid #f0f5f1; outline-offset: -3px; }
+.opt:focus-visible { outline: 3px solid ${amberText}; outline-offset: 2px; }
 
 .segment {
   display: grid;
@@ -2707,7 +2820,7 @@ button, input { -webkit-tap-highlight-color: transparent; }
 }
 .fc-card.flipped { transform: rotateY(180deg); }
 .fc-card:focus-visible { outline: none; }
-.fc-card:focus-visible .fc-face { outline: 3px solid ${amber}; outline-offset: 3px; }
+.fc-card:focus-visible .fc-face { outline: 3px solid ${amberText}; outline-offset: 3px; }
 .fc-face {
   position: absolute;
   inset: 0;
@@ -2718,16 +2831,15 @@ button, input { -webkit-tap-highlight-color: transparent; }
   gap: 12px;
   padding: 24px 22px 34px;
   border-radius: 18px;
-  border: 1.5px solid ${moss};
+  border: 2px solid ${moss};
   background: #fff;
-  box-shadow: 0 10px 24px -14px rgba(28, 37, 34, .35);
   backface-visibility: hidden;
   -webkit-backface-visibility: hidden;
   overflow-y: auto;
 }
 .fc-face.back {
   transform: rotateY(180deg);
-  border-color: ${amber};
+  border-color: ${amberText};
   background: #fdf9f0;
 }
 .fc-kicker {
@@ -2737,7 +2849,7 @@ button, input { -webkit-tap-highlight-color: transparent; }
   text-transform: uppercase;
   color: ${moss};
 }
-.fc-face.back .fc-kicker { color: ${amber}; }
+.fc-face.back .fc-kicker { color: ${amberText}; }
 .fc-term {
   font-family: 'Fraunces', Georgia, serif;
   font-size: clamp(22px, 4.5vw, 30px);
@@ -2788,7 +2900,7 @@ button, input { -webkit-tap-highlight-color: transparent; }
 }
 .fc-arrow:hover:not(:disabled) { border-color: ${moss}; background: #f0f5f1; }
 .fc-arrow:disabled { opacity: .35; cursor: default; }
-.fc-arrow:focus-visible { outline: 3px solid ${amber}; outline-offset: 2px; }
+.fc-arrow:focus-visible { outline: 3px solid ${amberText}; outline-offset: 2px; }
 .fc-dots { display: flex; align-items: center; gap: 7px; }
 .fc-dot {
   width: 7px;
@@ -2801,7 +2913,7 @@ button, input { -webkit-tap-highlight-color: transparent; }
   transition: background .2s, width .2s;
 }
 .fc-dot.active { width: 20px; background: ${moss}; }
-.fc-dot:focus-visible { outline: 2px solid ${amber}; outline-offset: 2px; }
+.fc-dot:focus-visible { outline: 2px solid ${amberText}; outline-offset: 2px; }
 @media (prefers-reduced-motion: reduce) {
   .fc-card { transition: none; }
 }
