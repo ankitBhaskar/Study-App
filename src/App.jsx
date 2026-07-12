@@ -3012,7 +3012,7 @@ input:focus-visible,
   }
 
   .tabs {
-    gap: 4px !important;
+    gap: 0 !important;
     margin-left: -16px !important;
     margin-right: -16px !important;
     padding-left: 16px !important;
@@ -3025,8 +3025,9 @@ input:focus-visible,
   }
 
   .tab {
-    padding: 10px 14px 12px;
-    font-size: 13.5px;
+    gap: 4px;
+    padding: 10px 7px 13px;
+    font-size: 13px;
   }
 
   .panel {
