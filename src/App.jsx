@@ -2411,10 +2411,10 @@ const styles = {
   },
   h1: {
     fontFamily: "'Fraunces', Georgia, serif",
-    fontSize: "clamp(42px, 5vw, 78px)",
-    lineHeight: 1.02,
+    fontSize: "clamp(38px, 4vw, 58px)",
+    lineHeight: 1.05,
     fontWeight: 600,
-    letterSpacing: "-0.035em",
+    letterSpacing: "-0.03em",
     margin: "0 0 20px",
   },
   h1accent: { color: moss, fontStyle: "italic" },
