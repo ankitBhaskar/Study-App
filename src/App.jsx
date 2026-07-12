@@ -10,11 +10,14 @@ import {
   ListChecks,
   LogOut,
   MessageCircle,
+  Minus,
   Pause,
   Play,
   RotateCcw,
   Send,
   Sparkles,
+  TrendingDown,
+  TrendingUp,
   Upload,
   X,
 } from "lucide-react";
@@ -383,6 +386,8 @@ export default function StudyMVP() {
     }
   };
 
+  const trend = weeklyStudyTrend(history);
+
   if (user === undefined) {
     return (
       <div className="app-shell" style={styles.app}>
@@ -427,6 +432,21 @@ export default function StudyMVP() {
           <span className="brand-tagline" style={styles.brandTagline}>Learn your way.</span>
         </div>
         <div style={styles.headerRight}>
+          {trend && (
+            <span
+              className="trend-badge"
+              style={{ ...styles.trendBadge, color: trend.delta < 0 ? muted : mossDeep }}
+            >
+              {trend.delta > 0 ? (
+                <TrendingUp size={13} aria-hidden="true" />
+              ) : trend.delta < 0 ? (
+                <TrendingDown size={13} aria-hidden="true" />
+              ) : (
+                <Minus size={13} aria-hidden="true" />
+              )}
+              {trend.thisWeek} {trend.thisWeek === 1 ? "session" : "sessions"} this week
+            </span>
+          )}
           {profile && (
             <span style={styles.usageBadge}>
               {profile.usage_today}/{profile.daily_limit} today
@@ -467,6 +487,27 @@ function formatHistoryDate(iso) {
   return sameDay
     ? d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })
     : d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
+// Real, honest trend from the documents already loaded into history — no
+// fabricated numbers. Counts study sessions (documents opened/analyzed) in
+// the last 7 days against the 7 days before that. Returns null when there's
+// nothing meaningful to show yet (no activity in either window).
+const DAY_MS = 24 * 60 * 60 * 1000;
+function weeklyStudyTrend(history) {
+  if (!history || history.length === 0) return null;
+  const now = Date.now();
+  let thisWeek = 0;
+  let lastWeek = 0;
+  for (const entry of history) {
+    const age = now - new Date(entry.created_at).getTime();
+    if (Number.isNaN(age)) continue;
+    if (age >= 0 && age < 7 * DAY_MS) thisWeek++;
+    else if (age >= 7 * DAY_MS && age < 14 * DAY_MS) lastWeek++;
+  }
+  if (thisWeek === 0 && lastWeek === 0) return null;
+  const delta = thisWeek - lastWeek;
+  return { thisWeek, delta };
 }
 
 function UploadScreen({ loading, onUpload, fileRef, error, history, onOpenHistory, onDeleteHistory, onClearHistory }) {
@@ -2183,6 +2224,18 @@ const styles = {
     fontVariantNumeric: "tabular-nums",
     whiteSpace: "nowrap",
   },
+  trendBadge: {
+    alignItems: "center",
+    gap: 5,
+    fontSize: 12,
+    fontWeight: 600,
+    background: "#fff",
+    border: `1px solid ${line}`,
+    borderRadius: 20,
+    padding: "5px 12px",
+    fontVariantNumeric: "tabular-nums",
+    whiteSpace: "nowrap",
+  },
   sampleBtn: {
     marginTop: 22,
     display: "inline-flex",
@@ -2663,6 +2716,11 @@ input:focus-visible,
 .brand-tagline { display: none; }
 @media (min-width: 640px) {
   .brand-tagline { display: inline; }
+}
+
+.trend-badge { display: none; }
+@media (min-width: 760px) {
+  .trend-badge { display: inline-flex; }
 }
 
 .tab {
