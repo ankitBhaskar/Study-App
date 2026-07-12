@@ -368,6 +368,11 @@ export default function StudyMVP() {
   const [doc, setDoc] = useState(null);
   const [error, setError] = useState("");
   const [history, setHistory] = useState([]);
+  // True until the first history fetch after sign-in resolves — it has to
+  // wait for Firebase auth and often a serverless cold start, so the list
+  // can take a few seconds. The upload screen shows a loading row instead
+  // of popping the list in late (or showing nothing when there's none).
+  const [historyLoading, setHistoryLoading] = useState(true);
   const [profile, setProfile] = useState(null);
   const [blockedMessage, setBlockedMessage] = useState("");
   const [showBanner, setShowBanner] = useState(
@@ -420,6 +425,8 @@ export default function StudyMVP() {
       if (res.ok) setHistory(data.documents);
     } catch {
       // best-effort — history list isn't critical path
+    } finally {
+      setHistoryLoading(false);
     }
   };
 
@@ -436,10 +443,12 @@ export default function StudyMVP() {
   useEffect(() => {
     if (user) {
       setBlockedMessage("");
+      setHistoryLoading(true);
       refreshHistory();
       refreshProfile();
     } else {
       setHistory([]);
+      setHistoryLoading(true);
       setProfile(null);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -646,6 +655,7 @@ export default function StudyMVP() {
           fileRef={fileRef}
           error={error}
           history={history}
+          historyLoading={historyLoading}
           onOpenHistory={openHistoryEntry}
           onDeleteHistory={deleteHistoryEntry}
           onClearHistory={clearAllHistory}
@@ -702,11 +712,78 @@ function weeklyStudyTrend(history) {
   return { thisWeek, delta };
 }
 
-function UploadScreen({ loading, onUpload, fileRef, error, history, onOpenHistory, onDeleteHistory, onClearHistory }) {
+// Shared between the desktop sidebar and the mobile inline block — which of
+// the two containers is visible is decided purely in CSS (min-width: 1100px).
+// Renders nothing once loading is done and there's no history to show.
+function HistoryPanel({ history, historyLoading, onOpenHistory, onDeleteHistory, onClearHistory }) {
+  if (!historyLoading && history.length === 0) return null;
+  return (
+    <>
+      <div style={styles.historyHead}>
+        <span style={styles.historyTitle}>
+          <Clock size={13} /> Recent documents
+        </span>
+        {history.length > 0 && (
+          <button style={styles.historyClear} onClick={onClearHistory}>
+            Clear all
+          </button>
+        )}
+      </div>
+      {history.length === 0 ? (
+        <div style={styles.historyLoading} role="status" aria-live="polite">
+          <div className="spinner spinner-sm" aria-hidden="true" />
+          Loading your documents…
+        </div>
+      ) : (
+        <div style={styles.historyList}>
+          {history.map((entry) => (
+            <div key={entry.id} className="history-item" style={styles.historyItem} onClick={() => onOpenHistory(entry)}>
+              <FileText size={15} style={{ color: muted, flexShrink: 0 }} />
+              <div style={styles.historyMeta}>
+                <p style={styles.historyDocTitle}>{entry.title}</p>
+                <p style={styles.historyFileName}>{entry.file_name}</p>
+              </div>
+              <span style={styles.historyDate}>{formatHistoryDate(entry.created_at)}</span>
+              <button
+                style={styles.historyDelete}
+                onClick={(e) => onDeleteHistory(entry.id, e)}
+                aria-label={`Remove ${entry.file_name} from history`}
+              >
+                <X size={14} />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+    </>
+  );
+}
+
+function UploadScreen({ loading, onUpload, fileRef, error, history, historyLoading, onOpenHistory, onDeleteHistory, onClearHistory }) {
   const [drag, setDrag] = useState(false);
+  const hasHistoryPanel = historyLoading || history.length > 0;
+  const historyPanel = (
+    <HistoryPanel
+      history={history}
+      historyLoading={historyLoading}
+      onOpenHistory={onOpenHistory}
+      onDeleteHistory={onDeleteHistory}
+      onClearHistory={onClearHistory}
+    />
+  );
 
   return (
-    <main id="main-content" className="upload-wrap" style={styles.uploadWrap}>
+    <main
+      id="main-content"
+      className={`upload-wrap ${hasHistoryPanel ? "has-sidebar" : ""}`}
+      style={styles.uploadWrap}
+    >
+      {hasHistoryPanel && (
+        <aside className="history-sidebar" aria-label="Recent documents">
+          <div className="history-sidebar-body">{historyPanel}</div>
+        </aside>
+      )}
+      <div className="upload-main">
       <p style={styles.eyebrow}>Learn your way.</p>
       <h1 className="hero-title" style={styles.h1}>
         Turn any document into a<br />
@@ -780,37 +857,12 @@ function UploadScreen({ loading, onUpload, fileRef, error, history, onOpenHistor
         </button>
       )}
 
-      {!loading && history.length > 0 && (
-        <div style={styles.historyBox}>
-          <div style={styles.historyHead}>
-            <span style={styles.historyTitle}>
-              <Clock size={13} /> Recent documents
-            </span>
-            <button style={styles.historyClear} onClick={onClearHistory}>
-              Clear all
-            </button>
-          </div>
-          <div style={styles.historyList}>
-            {history.map((entry) => (
-              <div key={entry.id} className="history-item" style={styles.historyItem} onClick={() => onOpenHistory(entry)}>
-                <FileText size={15} style={{ color: muted, flexShrink: 0 }} />
-                <div style={styles.historyMeta}>
-                  <p style={styles.historyDocTitle}>{entry.title}</p>
-                  <p style={styles.historyFileName}>{entry.file_name}</p>
-                </div>
-                <span style={styles.historyDate}>{formatHistoryDate(entry.created_at)}</span>
-                <button
-                  style={styles.historyDelete}
-                  onClick={(e) => onDeleteHistory(entry.id, e)}
-                  aria-label={`Remove ${entry.file_name} from history`}
-                >
-                  <X size={14} />
-                </button>
-              </div>
-            ))}
-          </div>
+      {!loading && hasHistoryPanel && (
+        <div className="history-inline" style={styles.historyBox}>
+          {historyPanel}
         </div>
       )}
+      </div>
     </main>
   );
 }
@@ -2541,6 +2593,14 @@ const styles = {
     paddingBottom: 2,
   },
   historyBox: { marginTop: 40, width: "min(560px, 100%)", textAlign: "left" },
+  historyLoading: {
+    display: "flex",
+    alignItems: "center",
+    gap: 10,
+    color: muted,
+    fontSize: 14,
+    padding: "10px 2px",
+  },
   historyHead: {
     display: "flex",
     alignItems: "center",
@@ -2567,7 +2627,10 @@ const styles = {
     textDecoration: "underline",
     padding: 0,
   },
-  historyList: { display: "grid", gap: 6 },
+  // minmax(0, 1fr) pins items to the container width so long nowrap
+  // titles ellipsize instead of stretching the track (matters in the
+  // narrow sidebar; harmless inline).
+  historyList: { display: "grid", gridTemplateColumns: "minmax(0, 1fr)", gap: 6 },
   historyItem: {
     display: "flex",
     alignItems: "center",
@@ -3001,7 +3064,44 @@ textarea:focus-visible,
   border-radius: 50%;
   animation: spin .8s linear infinite;
 }
+.spinner-sm { width: 18px; height: 18px; border-width: 2.5px; flex-shrink: 0; }
 @keyframes spin { to { transform: rotate(360deg); } }
+
+/* Recent documents: inline block below the dropzone on small screens, a
+   Claude-style left sidebar on laptops and up. Same HistoryPanel markup is
+   rendered in both containers; these rules decide which one is visible. */
+.history-sidebar { display: none; }
+.upload-main { display: contents; }
+@media (min-width: 1100px) {
+  .upload-wrap.has-sidebar {
+    display: grid !important;
+    grid-template-columns: 300px minmax(0, 1fr);
+    column-gap: clamp(32px, 4vw, 64px);
+    /* the inline flex style centers items; in grid mode the sidebar
+       should stretch so its divider runs the full height */
+    align-items: stretch !important;
+    padding-top: 40px !important;
+  }
+  .upload-wrap.has-sidebar .history-sidebar {
+    display: block;
+    text-align: left;
+    border-right: 1px solid ${line};
+    padding-right: 28px;
+  }
+  .history-sidebar-body {
+    position: sticky;
+    top: 24px;
+    max-height: calc(100svh - 48px);
+    overflow-y: auto;
+  }
+  .upload-wrap.has-sidebar .upload-main {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+  }
+  .upload-wrap.has-sidebar .history-inline { display: none !important; }
+}
 
 .brand-tagline { display: none; }
 @media (min-width: 640px) {

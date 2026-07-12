@@ -182,7 +182,17 @@ never guilt a learner over their own data.
   Active tab: `mossDeep` text, `moss` bottom border (or full border on
   desktop), 600 weight.
 - **History list** (`historyList`/`historyItem`): 6px row gap, each row a
-  bordered card (see Cards above), hover border → `moss`.
+  bordered card (see Cards above), hover border → `moss`. The grid track is
+  `minmax(0, 1fr)` so long nowrap titles ellipsize instead of widening the
+  track. On the upload screen it renders in two containers with CSS deciding
+  which is visible: inline below the dropzone (default), or a left sidebar at
+  ≥1100px (`.history-sidebar`, 300px column, full-height `1px line`
+  right divider, sticky scrollable body) — same Claude-style placement as the
+  study screen's ≥900px tab sidebar. While the first fetch after sign-in is
+  in flight, show a small spinner row ("Loading your documents…",
+  `.spinner-sm`, 18px) instead of nothing; once resolved with no documents,
+  the whole section — sidebar and inline — disappears entirely. Never show an
+  empty "Recent documents" shell.
 - **Quiz attempt history** (`quizHistory`/`attemptRow`): plain rows
   separated by `1px solid line` top border, expandable on click.
 
@@ -295,6 +305,10 @@ literal 12-column grid or hero-in-columns-2-8.
 
 - `@media (min-width: 900px)`: study screen becomes a two-column layout —
   sticky tab sidebar (col 1) + panel (col 2).
+- `@media (min-width: 1100px)`: upload screen becomes a two-column layout —
+  recent-documents sidebar (col 1, 300px) + centered hero/dropzone (col 2).
+  Only when there's history (or it's still loading); with none, the hero
+  stays centered full-width.
 - `@media (max-width: 700px)` / `(max-width: 420px)`: single-column,
   full-bleed tabs, stacked hero.
 - `@media (min-width: 760px)`: the weekly trend badge appears (hidden
