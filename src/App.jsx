@@ -426,11 +426,16 @@ export default function StudyMVP() {
       <style>{css}</style>
       <a href="#main-content" className="skip-link">Skip to content</a>
       <header className="app-header" style={styles.header}>
-        <div style={styles.brand}>
+        <button
+          type="button"
+          style={styles.brandBtn}
+          onClick={() => setStage("upload")}
+          aria-label="Go to home"
+        >
           <TelosMark size={32} />
           <span style={styles.brandName}>Telos</span>
           <span className="brand-tagline" style={styles.brandTagline}>Learn your way.</span>
-        </div>
+        </button>
         <div style={styles.headerRight}>
           {trend && (
             <span
@@ -2115,6 +2120,19 @@ const styles = {
     alignItems: "center",
   },
   brand: { display: "flex", alignItems: "center", gap: 10 },
+  brandBtn: {
+    display: "flex",
+    alignItems: "center",
+    gap: 10,
+    background: "none",
+    border: "none",
+    padding: 0,
+    margin: 0,
+    color: "inherit",
+    font: "inherit",
+    textAlign: "left",
+    cursor: "pointer",
+  },
   brandName: { fontWeight: 700, fontSize: 19, letterSpacing: "-0.02em", fontFamily: "'Fraunces', Georgia, serif" },
   brandTagline: {
     fontSize: 13,
