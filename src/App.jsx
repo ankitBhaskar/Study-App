@@ -152,13 +152,13 @@ function SyroraMark({ size = 32 }) {
 
 // Bump this when the banner's message changes materially — dismissing an
 // old version shouldn't silently suppress a genuinely new notice.
-const PROTOTYPE_BANNER_KEY = "syrora_prototype_banner_dismissed_v1";
+const EARLY_ACCESS_BANNER_KEY = "syrora_early_access_banner_dismissed_v1";
 
-function PrototypeBanner({ onGiveFeedback, onDismiss }) {
+function EarlyAccessBanner({ onGiveFeedback, onDismiss }) {
   return (
     <div style={styles.bannerBar} role="note">
       <p style={styles.bannerText}>
-        <strong>Prototype</strong> — Syrora is early and still changing. Run into something odd?
+        <strong>Early Access</strong> — Syrora is evolving quickly. We'd love your feedback as we build new features.
       </p>
       {onGiveFeedback && (
         <button style={styles.bannerBtn} onClick={onGiveFeedback}>
@@ -379,7 +379,7 @@ export default function StudyMVP() {
   const [profile, setProfile] = useState(null);
   const [blockedMessage, setBlockedMessage] = useState("");
   const [showBanner, setShowBanner] = useState(
-    () => typeof window === "undefined" || localStorage.getItem(PROTOTYPE_BANNER_KEY) !== "1"
+    () => typeof window === "undefined" || localStorage.getItem(EARLY_ACCESS_BANNER_KEY) !== "1"
   );
   const [showFeedback, setShowFeedback] = useState(false);
   // Config flags read from the backend (an env var, not a per-user
@@ -404,7 +404,7 @@ export default function StudyMVP() {
 
   const dismissBanner = () => {
     setShowBanner(false);
-    localStorage.setItem(PROTOTYPE_BANNER_KEY, "1");
+    localStorage.setItem(EARLY_ACCESS_BANNER_KEY, "1");
   };
 
   const authedFetch = async (path, options = {}) => {
@@ -599,7 +599,7 @@ export default function StudyMVP() {
             <span style={styles.brandName}>Syrora</span>
           </div>
         </header>
-        {showBanner && <PrototypeBanner onDismiss={dismissBanner} />}
+        {showBanner && <EarlyAccessBanner onDismiss={dismissBanner} />}
         <AuthScreen blockedMessage={blockedMessage} />
       </div>
     );
@@ -653,7 +653,7 @@ export default function StudyMVP() {
       </header>
 
       {showBanner && (
-        <PrototypeBanner onGiveFeedback={() => setShowFeedback(true)} onDismiss={dismissBanner} />
+        <EarlyAccessBanner onGiveFeedback={() => setShowFeedback(true)} onDismiss={dismissBanner} />
       )}
 
       {stage === "upload" ? (
