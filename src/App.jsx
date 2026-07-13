@@ -177,7 +177,7 @@ function EarlyAccessBanner({ onGiveFeedback, onDismiss }) {
   return (
     <div style={styles.bannerBar} role="note">
       <p style={styles.bannerText}>
-        <strong>Early Access</strong> — Syrora is evolving quickly. We'd love your feedback as we build new features.
+        <strong>Early Access:</strong> Syrora is evolving quickly. We'd love your feedback as we build new features.
       </p>
       {onGiveFeedback && (
         <button style={styles.bannerBtn} onClick={onGiveFeedback}>
@@ -252,7 +252,7 @@ function FeedbackModal({ onClose, authedFetch, context }) {
 
         {sent ? (
           <>
-            <p style={styles.resultSub}>Your feedback was sent — it goes straight to the person building this.</p>
+            <p style={styles.resultSub}>Your feedback was sent. It goes straight to the person building this.</p>
             <button style={styles.primaryBtn} onClick={onClose}>
               Done
             </button>
@@ -260,7 +260,7 @@ function FeedbackModal({ onClose, authedFetch, context }) {
         ) : (
           <form onSubmit={submit}>
             <p style={{ ...styles.resultSub, margin: "0 0 14px" }}>
-              What's working, what isn't — a star rating and a line or two is plenty.
+              What's working, what isn't: a star rating and a line or two is plenty.
             </p>
             <div style={styles.starRow} role="radiogroup" aria-label="Rating out of 5 stars">
               {[1, 2, 3, 4, 5].map((n) => {
@@ -440,6 +440,10 @@ export default function StudyMVP() {
   // of popping the list in late (or showing nothing when there's none).
   const [historyLoading, setHistoryLoading] = useState(true);
   const [profile, setProfile] = useState(null);
+  // Briefly true right after usage_today changes, so the badge can pulse
+  // instead of silently jumping to a new number.
+  const [usagePulse, setUsagePulse] = useState(false);
+  const prevUsageRef = useRef(null);
   const [blockedMessage, setBlockedMessage] = useState("");
   const [showBanner, setShowBanner] = useState(
     () => typeof window === "undefined" || localStorage.getItem(EARLY_ACCESS_BANNER_KEY) !== "1"
@@ -481,6 +485,12 @@ export default function StudyMVP() {
       setBlockedMessage(data?.detail || "You don't have access to this app.");
       await signOut(auth);
     }
+    // Every AI action that spends a usage unit is a POST — refreshing the
+    // usage badge here (once, centrally) means it stays live without
+    // threading a refresh call through every panel that can trigger one.
+    if (res.ok && (options.method || "GET").toUpperCase() === "POST" && path !== "/api/feedback") {
+      refreshProfile();
+    }
     return res;
   };
 
@@ -500,7 +510,14 @@ export default function StudyMVP() {
     try {
       const res = await authedFetch("/api/profile");
       const data = await res.json().catch(() => null);
-      if (res.ok) setProfile(data);
+      if (res.ok && data) {
+        if (prevUsageRef.current !== null && data.usage_today !== prevUsageRef.current) {
+          setUsagePulse(true);
+          setTimeout(() => setUsagePulse(false), 700);
+        }
+        prevUsageRef.current = data.usage_today;
+        setProfile(data);
+      }
     } catch {
       // best-effort
     }
@@ -516,6 +533,7 @@ export default function StudyMVP() {
       setHistory([]);
       setHistoryLoading(true);
       setProfile(null);
+      prevUsageRef.current = null;
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user]);
@@ -699,7 +717,7 @@ export default function StudyMVP() {
             </span>
           )}
           {profile && (
-            <span style={styles.usageBadge}>
+            <span className={`usage-badge ${usagePulse ? "usage-badge-pulse" : ""}`} style={styles.usageBadge}>
               {profile.usage_today}/{profile.daily_limit} today
             </span>
           )}
@@ -1455,7 +1473,7 @@ function FlashcardsPanel({ documentId, authedFetch }) {
   return (
     <div className="fade">
       <h3 style={{ ...styles.panelH, marginTop: 0 }}>Flashcards</h3>
-      <p style={styles.resultSub}>Six cards per set — tap a card to flip it.</p>
+      <p style={styles.resultSub}>Six cards per set. Tap a card to flip it.</p>
 
       {loading && (
         <p style={styles.resultSub}>
@@ -3213,6 +3231,26 @@ textarea:focus-visible,
 .trend-badge { display: none; }
 @media (min-width: 760px) {
   .trend-badge { display: inline-flex; }
+}
+
+/* Usage badge ("N/limit today") updates live after every AI action; this
+   flash is what makes the silent number change readable as an update
+   rather than a layout glitch. Same notice tokens as the weak-topic chip
+   and prototype banner, so "something changed" reads consistently. */
+.usage-badge { transition: background-color .3s ease, border-color .3s ease, color .3s ease; }
+.usage-badge-pulse {
+  animation: usage-pulse .7s ease;
+  background: #fbeede !important;
+  border-color: #f0d9b8 !important;
+  color: ${amberText} !important;
+}
+@keyframes usage-pulse {
+  0% { transform: scale(1); }
+  30% { transform: scale(1.12); }
+  100% { transform: scale(1); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .usage-badge-pulse { animation: none; }
 }
 
 .tab {
