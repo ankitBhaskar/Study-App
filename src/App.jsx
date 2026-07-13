@@ -131,31 +131,34 @@ function friendlyAuthError(code) {
   }
 }
 
-// The Telos mark: a rounded moss tile with a white "T" built from plain
+// The Syrora mark: a rounded moss tile with a white "S" built from plain
 // shapes (not text) so it stays crisp at favicon sizes regardless of which
-// fonts are installed, plus a small amber dot — the "telos" (end goal) a
-// learner is working toward. Used both in the app header and as the
-// browser-tab favicon (public/favicon.svg mirrors this exact design).
-function TelosMark({ size = 32 }) {
+// fonts are installed, plus a small amber dot — a spark of insight adapting
+// to the learner. Used both in the app header and as the browser-tab
+// favicon (public/favicon.svg mirrors this exact design).
+function SyroraMark({ size = 32 }) {
   return (
     <svg width={size} height={size} viewBox="0 0 64 64" fill="none" aria-hidden="true">
       <rect width="64" height="64" rx="16" fill={moss} />
-      <rect x="15" y="16" width="34" height="8" rx="3" fill="#fff" />
-      <rect x="27" y="16" width="10" height="33" rx="3" fill="#fff" />
-      <circle cx="47" cy="47" r="6" fill={amber} />
+      <rect x="16" y="15" width="30" height="8" rx="3" fill="#fff" />
+      <rect x="16" y="28" width="30" height="8" rx="3" fill="#fff" />
+      <rect x="16" y="41" width="30" height="8" rx="3" fill="#fff" />
+      <rect x="16" y="15" width="8" height="21" rx="3" fill="#fff" />
+      <rect x="38" y="28" width="8" height="21" rx="3" fill="#fff" />
+      <circle cx="52" cy="52" r="5" fill={amber} />
     </svg>
   );
 }
 
 // Bump this when the banner's message changes materially — dismissing an
 // old version shouldn't silently suppress a genuinely new notice.
-const PROTOTYPE_BANNER_KEY = "telos_prototype_banner_dismissed_v1";
+const PROTOTYPE_BANNER_KEY = "syrora_prototype_banner_dismissed_v1";
 
 function PrototypeBanner({ onGiveFeedback, onDismiss }) {
   return (
     <div style={styles.bannerBar} role="note">
       <p style={styles.bannerText}>
-        <strong>Prototype</strong> — Telos is early and still changing. Run into something odd?
+        <strong>Prototype</strong> — Syrora is early and still changing. Run into something odd?
       </p>
       {onGiveFeedback && (
         <button style={styles.bannerBtn} onClick={onGiveFeedback}>
@@ -312,9 +315,9 @@ function AuthScreen({ blockedMessage }) {
 
   return (
     <main id="main-content" className="upload-wrap" style={styles.uploadWrap}>
-      <p style={styles.eyebrow}>Learn your way.</p>
+      <p style={styles.eyebrow}>Knowledge that adapts to every mind.</p>
       <h1 className="hero-title" style={styles.h1}>
-        Turn any document into a<br />
+        Turn any document into a{" "}<br />
         <span style={styles.h1accent}>study session.</span>
       </h1>
       <p className="hero-sub" style={styles.sub}>
@@ -592,8 +595,8 @@ export default function StudyMVP() {
         <a href="#main-content" className="skip-link">Skip to content</a>
         <header className="app-header" style={styles.header}>
           <div style={styles.brand}>
-            <TelosMark size={32} />
-            <span style={styles.brandName}>Telos</span>
+            <SyroraMark size={32} />
+            <span style={styles.brandName}>Syrora</span>
           </div>
         </header>
         {showBanner && <PrototypeBanner onDismiss={dismissBanner} />}
@@ -613,9 +616,9 @@ export default function StudyMVP() {
           onClick={() => setStage("upload")}
           aria-label="Go to home"
         >
-          <TelosMark size={32} />
-          <span style={styles.brandName}>Telos</span>
-          <span className="brand-tagline" style={styles.brandTagline}>Learn your way.</span>
+          <SyroraMark size={32} />
+          <span style={styles.brandName}>Syrora</span>
+          <span className="brand-tagline" style={styles.brandTagline}>Knowledge that adapts to every mind.</span>
         </button>
         <div style={styles.headerRight}>
           {trend && (
@@ -789,9 +792,9 @@ function UploadScreen({ loading, onUpload, fileRef, error, history, historyLoadi
         </aside>
       )}
       <div className="upload-main">
-      <p style={styles.eyebrow}>Learn your way.</p>
+      <p style={styles.eyebrow}>Knowledge that adapts to every mind.</p>
       <h1 className="hero-title" style={styles.h1}>
-        Turn any document into a<br />
+        Turn any document into a{" "}<br />
         <span style={styles.h1accent}>study session.</span>
       </h1>
       <p className="hero-sub" style={styles.sub}>

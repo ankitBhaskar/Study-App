@@ -1,4 +1,4 @@
-# Telos — Learn your way.
+# Syrora — Knowledge that adapts to every mind.
 
 A React/Vite study app that turns an uploaded PDF into a study workflow: Gemini-generated summary, quiz, flashcards, podcast script and a document-scoped tutor chat. The API is a Python FastAPI app deployed as Vercel serverless functions, so the whole project runs on Vercel from this one repo.
 

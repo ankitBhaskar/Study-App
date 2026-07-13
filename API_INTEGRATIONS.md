@@ -407,9 +407,9 @@ POST https://api.resend.com/emails
 Header: Authorization: Bearer <RESEND_API_KEY>
 
 {
-  "from": "Telos Feedback <onboarding@resend.dev>",
+  "from": "Syrora Feedback <onboarding@resend.dev>",
   "to": ["you@example.com"],
-  "subject": "Telos feedback: ★★★★☆ (4/5)",
+  "subject": "Syrora feedback: ★★★★☆ (4/5)",
   "text": "Rating: ★★★★☆ (4/5)\nFrom: learner@example.com\nScreen: podcast\n\n<comment text>"
 }
 ```

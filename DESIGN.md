@@ -1,8 +1,8 @@
-# Telos design system
+# Syrora design system
 
 ## Overview
 
-Telos is a single-learner study companion — upload a PDF, get a summary,
+Syrora is a single-learner study companion — upload a PDF, get a summary,
 quiz, flashcards, podcast, and a tutor chat scoped to that document. The
 design system exists to keep the app off the generic "AI slop" defaults
 (Inter, purple-indigo gradients, soft drop shadows, uniform three-up cards)
@@ -47,7 +47,7 @@ text legible.
 
 - **Display / headings**: `Fraunces`, weight 600. Used for section-title-
   level elements (`panelH`, `docTitle`, `podTitle`, `authTitle`) and large
-  numeric displays (`scoreNum`, flashcard term) — Telos is a dense app UI,
+  numeric displays (`scoreNum`, flashcard term) — Syrora is a dense app UI,
   not a marketing page, so "heading" means every section-title-level
   element, not literally only `<h1>`/`<h2>` tags.
 - **Body + UI controls**: `Source Sans 3`, 16px base, line-height 1.6 (set
@@ -73,7 +73,7 @@ text legible.
 
 - **Base unit**: 8px, applied at the macro/section level (panel padding,
   section margins, header padding).
-- **Not** a literal 24px rhythm on every value — Telos is a dense UI (quiz
+- **Not** a literal 24px rhythm on every value — Syrora is a dense UI (quiz
   options, chat bubbles, transcript lines) where 6–14px micro-gaps are
   load-bearing for readability. Forcing those to 24px multiples would hurt
   the UI it serves. If you want a strict macro-only audit, common values
@@ -94,7 +94,7 @@ text legible.
 
 ## Elevation — no soft shadows
 
-Telos does **not** use blurred drop shadows for elevation. Depth is
+Syrora does **not** use blurred drop shadows for elevation. Depth is
 expressed with a 1–2px solid border (`line`, `moss`, or `amberText`
 depending on context) instead. The one narrow exception: a 0-blur
 `outline`/inset ring used as a *state* indicator (e.g. the picked quiz
@@ -235,7 +235,7 @@ not elevation.
   consistently everywhere it appears. 12px radius, sits directly under the
   header, `1200px`-max content width to match the header/panel measure.
   Dismissible (X button, right-aligned); dismissal is remembered in
-  `localStorage` under a versioned key (`telos_prototype_banner_dismissed_v1`)
+  `localStorage` under a versioned key (`syrora_prototype_banner_dismissed_v1`)
   — bump the version suffix when the message changes materially so a stale
   dismissal doesn't silently hide a genuinely new notice.
 
@@ -273,7 +273,7 @@ not elevation.
 
 ### Not yet in the product
 
-Checkboxes, native radio inputs, and tooltips don't exist in Telos today —
+Checkboxes, native radio inputs, and tooltips don't exist in Syrora today —
 don't invent specs for components that aren't built. If one of these gets
 added, extend this file with a real section following the same format
 (state table + notes), not a guess.
@@ -351,7 +351,7 @@ literal 12-column grid or hero-in-columns-2-8.
    tighter existing rhythm.
 8. **Don't** add a purple-indigo gradient, a three-up feature-card row, or
    generic SaaS copy ("transform your workflow") — these are exactly the
-   generic-AI-dashboard patterns Telos is deliberately avoiding.
+   generic-AI-dashboard patterns Syrora is deliberately avoiding.
 9. **Don't** invent specs for components that don't exist in the product
    yet (checkboxes, tooltips, modals) — extend this file when they're
    actually built.

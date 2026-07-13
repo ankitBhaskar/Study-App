@@ -133,7 +133,7 @@ ENABLE_BROWSER_VOICE = os.getenv("ENABLE_BROWSER_VOICE", "false").strip().lower(
 # isn't set.
 RESEND_API_KEY = os.getenv("RESEND_API_KEY")
 FEEDBACK_EMAIL_TO = os.getenv("FEEDBACK_EMAIL_TO")
-FEEDBACK_EMAIL_FROM = os.getenv("FEEDBACK_EMAIL_FROM", "Telos Feedback <onboarding@resend.dev>")
+FEEDBACK_EMAIL_FROM = os.getenv("FEEDBACK_EMAIL_FROM", "Syrora Feedback <onboarding@resend.dev>")
 
 app = FastAPI(
     title=APP_NAME,
@@ -421,7 +421,7 @@ async def send_feedback_email(rating: int, comment: str, context: str, from_emai
                 json={
                     "from": FEEDBACK_EMAIL_FROM,
                     "to": [FEEDBACK_EMAIL_TO],
-                    "subject": f"Telos feedback: {stars} ({rating}/5)",
+                    "subject": f"Syrora feedback: {stars} ({rating}/5)",
                     "text": text_body,
                 },
             )
