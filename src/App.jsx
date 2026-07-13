@@ -2806,6 +2806,7 @@ const styles = {
   },
   tabs: {
     display: "flex",
+    justifyContent: "space-between",
     gap: 6,
     marginBottom: 22,
     borderBottom: `1px solid ${line}`,
