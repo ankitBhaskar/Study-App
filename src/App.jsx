@@ -23,9 +23,15 @@ import {
   Upload,
   X,
 } from "lucide-react";
-import { onAuthStateChanged, signInWithEmailAndPassword, signOut } from "firebase/auth";
+import {
+  GoogleAuthProvider,
+  onAuthStateChanged,
+  signInWithEmailAndPassword,
+  signInWithPopup,
+  signOut,
+} from "firebase/auth";
 import ReactMarkdown from "react-markdown";
-import { auth } from "./firebase";
+import { auth, googleProvider } from "./firebase";
 
 // Gemini output often contains markdown (bold, bullet lists, etc.) — render
 // it instead of showing literal asterisks. react-markdown renders straight
@@ -126,6 +132,10 @@ function friendlyAuthError(code) {
       return "Incorrect email or password.";
     case "auth/too-many-requests":
       return "Too many attempts. Please wait a moment and try again.";
+    case "auth/popup-blocked":
+      return "Your browser blocked the sign-in popup. Please allow popups for this site and try again.";
+    case "auth/account-exists-with-different-credential":
+      return "An account already exists with this email using a different sign-in method.";
     default:
       return "Something went wrong. Please try again.";
   }
@@ -294,6 +304,20 @@ function FeedbackModal({ onClose, authedFetch, context }) {
   );
 }
 
+// The standard four-color "G" glyph Google's own branding guidelines
+// specify for third-party "Sign in with Google" buttons — not the Syrora
+// mark, so it keeps its real colors regardless of theme.
+function GoogleIcon({ size = 18 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 48 48" aria-hidden="true">
+      <path fill="#4285F4" d="M45.12 24.5c0-1.56-.14-3.06-.4-4.5H24v8.51h11.84c-.51 2.75-2.06 5.08-4.39 6.64v5.52h7.11c4.16-3.83 6.56-9.47 6.56-16.17z" />
+      <path fill="#34A853" d="M24 46c5.94 0 10.92-1.97 14.56-5.33l-7.11-5.52c-1.97 1.32-4.49 2.1-7.45 2.1-5.73 0-10.58-3.87-12.31-9.07H4.34v5.7C7.96 41.07 15.4 46 24 46z" />
+      <path fill="#FBBC05" d="M11.69 28.18A13.89 13.89 0 0 1 10.9 24c0-1.45.25-2.86.69-4.18v-5.7H4.34A21.93 21.93 0 0 0 2 24c0 3.55.85 6.91 2.34 9.88l7.35-5.7z" />
+      <path fill="#EA4335" d="M24 10.75c3.23 0 6.13 1.11 8.41 3.29l6.31-6.31C34.91 4.18 29.93 2 24 2 15.4 2 7.96 6.93 4.34 14.12l7.35 5.7c1.73-5.2 6.58-9.07 12.31-9.07z" />
+    </svg>
+  );
+}
+
 function AuthScreen({ blockedMessage }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -313,6 +337,22 @@ function AuthScreen({ blockedMessage }) {
     }
   };
 
+  const submitGoogle = async () => {
+    setError("");
+    setBusy(true);
+    try {
+      await signInWithPopup(auth, googleProvider);
+    } catch (err) {
+      // The user closing the popup or triggering a second one isn't an
+      // error worth surfacing — every other failure gets the normal message.
+      if (err.code !== "auth/popup-closed-by-user" && err.code !== "auth/cancelled-popup-request") {
+        setError(friendlyAuthError(err.code));
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <main id="main-content" className="upload-wrap" style={styles.uploadWrap}>
       <p style={styles.eyebrow}>Knowledge that adapts to every mind.</p>
@@ -325,6 +365,20 @@ function AuthScreen({ blockedMessage }) {
       </p>
       <form onSubmit={submit} style={styles.authForm}>
         <h2 style={styles.authTitle}>Sign in</h2>
+        <button
+          type="button"
+          className="google-btn"
+          style={{ ...styles.googleBtn, opacity: busy ? 0.6 : 1 }}
+          onClick={submitGoogle}
+          disabled={busy}
+        >
+          <GoogleIcon size={18} /> Continue with Google
+        </button>
+        <div style={styles.authDivider} aria-hidden="true">
+          <span style={styles.authDividerLine} />
+          <span style={styles.authDividerText}>or</span>
+          <span style={styles.authDividerLine} />
+        </div>
         <input
           style={styles.chatInput}
           type="email"
@@ -599,7 +653,6 @@ export default function StudyMVP() {
             <span style={styles.brandName}>Syrora</span>
           </div>
         </header>
-        {showBanner && <EarlyAccessBanner onDismiss={dismissBanner} />}
         <AuthScreen blockedMessage={blockedMessage} />
       </div>
     );
@@ -2577,6 +2630,25 @@ const styles = {
     fontFamily: "inherit",
     textAlign: "center",
   },
+  googleBtn: {
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 10,
+    width: "100%",
+    background: "#fff",
+    color: ink,
+    border: `1px solid ${line}`,
+    borderRadius: 10,
+    padding: "11px 20px",
+    fontSize: 14.5,
+    fontWeight: 600,
+    fontFamily: "inherit",
+    cursor: "pointer",
+  },
+  authDivider: { display: "flex", alignItems: "center", gap: 10, margin: "2px 0" },
+  authDividerLine: { flex: 1, height: 1, background: line },
+  authDividerText: { fontSize: 12.5, color: muted },
   headerRight: { display: "flex", alignItems: "center", gap: 10 },
   usageBadge: { ...pillBadge },
   trendBadge: { ...pillBadge, alignItems: "center", gap: 5, fontWeight: 600 },
@@ -3179,6 +3251,8 @@ textarea:focus-visible,
 
 .history-item:hover { border-color: ${moss}; }
 .history-item button:hover { background: ${paper}; color: ${ink}; }
+
+.google-btn:hover { border-color: ${moss}; background: ${paper}; }
 
 .fade { animation: fade .35s ease; }
 @keyframes fade { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }

@@ -120,6 +120,7 @@ stacked-behind pseudo-elements) if you need actual depth.
 | Underline link (`sampleBtn`) | transparent | `ink` | `1.5px solid amber` bottom only | — | — | 14px/500 |
 | Selectable pill (`regenActionBtn`) | `#fff` (current: `#eef4f0`) | `mossDeep` | `1.5px solid line` (current: `moss`) | 10px | `9px 15px` | 13.5px/600 |
 | Icon-only round (`fc-arrow`) | `#fff` | `mossDeep` | `1.5px solid line` | 50% | 40×40px | — |
+| Third-party (`googleBtn`) | `#fff` | `ink` | `1px solid line` | 10px | `11px 20px` | 14.5px/600 |
 
 - **Disabled**: `opacity: 0.5`, `cursor: default` — set inline per-button,
   not a shared class (search each button's `disabled` prop for the exact
@@ -132,6 +133,12 @@ stacked-behind pseudo-elements) if you need actual depth.
   "…ing" verb ("Generating…", "Loading…") — never a separate disabled
   overlay. Spinners inside labelled buttons are `aria-hidden="true"`
   (the button's own text/label is what screen readers announce).
+- **Third-party auth** (`googleBtn`, "Continue with Google"): the one place
+  the design system intentionally steps aside — Google's own multi-color
+  "G" glyph (`GoogleIcon`) keeps its real brand colors regardless of the
+  moss/amber palette, per Google's sign-in button guidelines. Sits above
+  the email/password form on the sign-in screen, separated by a plain
+  `or` divider (`authDivider`/`authDividerLine`/`authDividerText`).
 
 ### Cards / panels
 
