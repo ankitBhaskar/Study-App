@@ -4,7 +4,7 @@ A React/Vite study app that turns an uploaded PDF into a study workflow: Gemini-
 
 ## Current features
 
-- Firebase email/password login — uploading, chat and podcast audio require an account, with no public sign-up form
+- Firebase login (email/password, plus one-click Google sign-in) — uploading, chat and podcast audio require an account
 - Optional email allowlist (`ALLOWED_EMAILS`) to restrict the app to specific accounts only
 - Per-user daily usage limit on AI actions (analyze / chat / audio), enforced server-side
 - Document history stored per-account in Firestore (title, summary, quiz, podcast script and the extracted text — never the PDF file itself) with reopen/delete/clear-all; Tutor chat works on reopened documents
@@ -47,11 +47,11 @@ The repo is zero-config for Vercel: the Vite frontend is built as static assets 
 ### 1. Create a Firebase project
 
 1. Go to [console.firebase.google.com](https://console.firebase.google.com) → **Add project**.
-2. **Build → Authentication → Get started** → enable the **Email/Password** sign-in provider.
+2. **Build → Authentication → Get started** → enable the **Email/Password** sign-in provider, and also enable **Google** (pick a support email when prompted) so new users can sign in with one click instead of needing an account created for them first.
 3. **Build → Firestore Database → Create database** → pick a region close to your Vercel deployment → start in **Production mode** (the backend uses admin credentials that bypass rules, so no rules tuning is needed).
 4. **Project settings → General → Your apps** → click the web (`</>`) icon → register an app → copy the `firebaseConfig` values. These are public identifiers, safe to expose in the frontend bundle.
 5. **Project settings → Service accounts → Generate new private key** → downloads a JSON file. This is a secret — never commit it or expose it to the frontend.
-6. Create your own account: **Authentication → Users → Add user** → enter your email and a password. There's no public sign-up screen in the app, so this is how you (and anyone else you explicitly invite) get an account.
+6. Create your own account: **Authentication → Users → Add user** → enter your email and a password. There's no public sign-up screen for email/password in the app, so this is how you (and anyone else you explicitly invite) get an email/password account — Google sign-in, once enabled above, creates a Firebase user automatically on first login instead.
 
 ### 2. Set environment variables in Vercel
 
@@ -149,6 +149,6 @@ The expected Gemini output shape is documented in `gemini_response_contract.json
 - Serverless functions keep no state between requests, so the browser holds the extracted document text and sends it with each tutor-chat message.
 - Document history stores the derived study data plus the extracted text (truncated to fit Firestore's 1 MiB document cap) — the PDF file itself is never stored. All four tabs, including Tutor chat, work when reopening a document from history. Documents analyzed before text storage was added show a re-upload notice in the Tutor tab.
 - Scanned (image-only) PDFs need OCR first; the API returns a clear error for them.
-- There's no public sign-up form — new accounts are created manually in the Firebase Console (Authentication → Users). Hiding the sign-up button is UX only; the real access control is the server-side `ALLOWED_EMAILS` check, since Firebase's public API key means anyone could otherwise call Firebase's own sign-up endpoint directly.
+- There's no public email/password sign-up form — those accounts are created manually in the Firebase Console (Authentication → Users). Google sign-in is the self-service path instead: it creates a new Firebase account automatically on first login. Either way, `ALLOWED_EMAILS` (if set) is the real access control, enforced server-side — Google sign-in doesn't bypass it.
 - If a signed-in account isn't on `ALLOWED_EMAILS`, every API call returns 403 and the frontend immediately signs them out with a clear message rather than leaving them stuck in a broken logged-in state.
 - Without a key configured, the corresponding feature returns a clear "not configured" error rather than failing silently; the sample-document demo mode never needs any key and works for anyone signed in.
