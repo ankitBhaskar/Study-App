@@ -17,7 +17,7 @@ A React/Vite study app that turns an uploaded PDF into a study workflow: Gemini-
 - Chat and summary text render markdown (bold, lists, etc.) instead of showing raw asterisks
 - Tutor chat answering questions scoped to the uploaded PDF via Gemini
 - "Try it with a sample document" demo mode that works without signing in
-- Dismissible "this is a prototype" banner with a "Give feedback" button (star rating + comment); every submission is saved to Firestore and optionally emailed via Resend (`RESEND_API_KEY` + `FEEDBACK_EMAIL_TO`)
+- Dismissible "Early Access" banner with a "Give feedback" button (star rating + comment); every submission is saved to Firestore and optionally emailed via Resend (`RESEND_API_KEY` + `FEEDBACK_EMAIL_TO`)
 - Configurable Gemini model, ElevenLabs model/voices and daily usage limit via environment variables
 
 ## Project structure

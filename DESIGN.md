@@ -32,7 +32,7 @@ or style-key names to find every usage.
 | Error | `#b03d2e` on `#fdeeea` bg, `#f2cfc5` border | Error messages, failed states |
 | Weak-topic chip | `#fbeede` bg / `amberText` text / `#f0d9b8` border | Quiz "topics to review" |
 | "Current" tag | `#dcebe2` bg / `mossDeep` text | Active regenerate-option indicator |
-| Notice banner | `#fbeede` bg / `amberText` text / `#f0d9b8` border | Prototype banner — same tokens as the weak-topic chip, deliberately, so "notice" reads consistently |
+| Notice banner | `#fbeede` bg / `amberText` text / `#f0d9b8` border | Early Access banner — same tokens as the weak-topic chip, deliberately, so "notice" reads consistently |
 | Modal scrim | `rgba(28, 37, 34, 0.45)` (`ink` at 45%) | Overlay behind a modal card |
 
 **Rule**: `moss` and `amber` are for icons, borders, large display type
@@ -229,15 +229,15 @@ not elevation.
 
 ### Banners
 
-- **Prototype banner** (`bannerBar`): the one banner in the product today.
+- **Early Access banner** (`bannerBar`): the one banner in the product today.
   Amber-tint notice style — `#fbeede` fill, `#f0d9b8` border, `amberText`
   text — same palette as the weak-topic chip, so "notice" reads
   consistently everywhere it appears. 12px radius, sits directly under the
   header, `1200px`-max content width to match the header/panel measure.
   Dismissible (X button, right-aligned); dismissal is remembered in
-  `localStorage` under a versioned key (`syrora_prototype_banner_dismissed_v1`)
-  — bump the version suffix when the message changes materially so a stale
-  dismissal doesn't silently hide a genuinely new notice.
+  `localStorage` under a versioned key (`syrora_early_access_banner_dismissed_v1`)
+  — bump the version suffix (or the key's name) when the message changes
+  materially so a stale dismissal doesn't silently hide a genuinely new notice.
 
 ### Modals
 
