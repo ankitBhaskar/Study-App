@@ -136,8 +136,17 @@ function friendlyAuthError(code) {
       return "Your browser blocked the sign-in popup. Please allow popups for this site and try again.";
     case "auth/account-exists-with-different-credential":
       return "An account already exists with this email using a different sign-in method.";
+    case "auth/operation-not-allowed":
+      return "Google sign-in isn't turned on for this app yet. Enable it in Firebase Console → Authentication → Sign-in method.";
+    case "auth/unauthorized-domain":
+      return "This site's domain isn't authorized for sign-in yet. Add it in Firebase Console → Authentication → Settings → Authorized domains.";
+    case "auth/configuration-not-found":
+      return "Sign-in isn't fully configured for this Firebase project yet.";
     default:
-      return "Something went wrong. Please try again.";
+      // Unrecognized codes are rare enough that showing the raw code beats
+      // a silent generic message — it's the fastest way to diagnose a new
+      // one without needing to reproduce it with browser devtools open.
+      return code ? `Something went wrong (${code}). Please try again.` : "Something went wrong. Please try again.";
   }
 }
 
