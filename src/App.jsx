@@ -976,7 +976,7 @@ function StudyScreen({ tab, setTab, fileName, doc, authedFetch, browserVoiceEnab
               className={`tab ${active ? "active" : ""}`}
               onClick={() => setTab(s.id)}
             >
-              <Icon size={15} strokeWidth={2.2} />
+              <Icon size={18} strokeWidth={2.1} />
               {s.label}
             </button>
           );
@@ -3566,6 +3566,14 @@ textarea:focus-visible,
     gap: 4px;
     padding: 10px 7px 13px;
     font-size: 13px;
+  }
+
+  /* Larger tab icons (18px) fit fine at tablet/desktop widths but overflow
+     the five-tab row here — back to the size the exact-fit mobile layout
+     was tuned against. */
+  .tab svg {
+    width: 15px;
+    height: 15px;
   }
 
   .panel {
