@@ -3468,6 +3468,20 @@ textarea:focus-visible,
     padding-left: 28px;
     padding-right: 28px;
   }
+
+  /* This band reads as "desktop" too (a non-maximized window, or display
+     scaling pushing a laptop under 900 CSS px) — the base 14px row sized
+     for tight spaces looks lost at these widths. */
+  .tab {
+    gap: 9px;
+    padding: 13px 18px 16px;
+    font-size: 15.5px;
+  }
+
+  .tab svg {
+    width: 20px;
+    height: 20px;
+  }
 }
 
 @media (min-width: 900px) {
