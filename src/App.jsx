@@ -3254,17 +3254,27 @@ textarea:focus-visible,
   .usage-badge-pulse { animation: none; }
 }
 
+/* One consistent horizontal underline row at every width — the tab bar and
+   its underline run edge to edge of the viewport (calc breakout from the
+   centered wrapper; body clips the half-pixel of scrollbar overhang), the
+   labels stay aligned with the content column via the matching padding. */
+.tabs {
+  margin-left: calc(50% - 50vw);
+  margin-right: calc(50% - 50vw);
+  padding-left: calc(50vw - 50%);
+  padding-right: calc(50vw - 50%);
+}
 .tab {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 7px;
+  gap: 9px;
   min-width: max-content;
   background: transparent;
   border: none;
-  padding: 10px 16px 13px;
+  padding: 13px 18px 16px;
   margin-bottom: -1px;
-  font-size: 14px;
+  font-size: 15.5px;
   font-weight: 500;
   color: ${muted};
   cursor: pointer;
@@ -3272,6 +3282,7 @@ textarea:focus-visible,
   border-bottom: 2px solid transparent;
   transition: color .15s, border-color .15s;
 }
+.tab svg { width: 20px; height: 20px; flex-shrink: 0; }
 .tab:hover { color: ${ink}; }
 .tab.active { color: ${mossDeep}; border-bottom-color: ${moss}; font-weight: 600; }
 
@@ -3456,90 +3467,15 @@ textarea:focus-visible,
   .fc-card { transition: none; }
 }
 
-/* Tablet: same full-bleed idea as the mobile block below, scaled to this
-   range's own gutter (.study-wrap is min(1200px, 100vw - 56px), which
-   works out to a constant 28px side margin for any viewport under
-   1256px) — the tab row otherwise sits boxed in by that margin instead of
-   running edge to edge like it does on mobile. */
-@media (min-width: 701px) and (max-width: 899px) {
-  .tabs {
-    margin-left: -28px;
-    margin-right: -28px;
-    padding-left: 28px;
-    padding-right: 28px;
-  }
-
-  /* This band reads as "desktop" too (a non-maximized window, or display
-     scaling pushing a laptop under 900 CSS px) — the base 14px row sized
-     for tight spaces looks lost at these widths. */
-  .tab {
-    gap: 9px;
-    padding: 13px 18px 16px;
-    font-size: 15.5px;
-  }
-
-  .tab svg {
-    width: 20px;
-    height: 20px;
-  }
-}
-
+/* The study screen keeps one stacked layout at every width — the tab row
+   renders identically on mobile and desktop (per explicit preference over
+   the earlier >=900px sidebar variant). Only the reading measure inside
+   the panel is capped so text lines don't get too long on wide screens. */
 @media (min-width: 900px) {
   .panel .fade {
     max-width: 860px;
-  }
-
-  .study-wrap {
-    display: grid !important;
-    grid-template-columns: minmax(220px, 320px) minmax(0, 1fr);
-    grid-template-rows: auto 1fr;
-    column-gap: clamp(28px, 4vw, 56px);
-    align-items: start;
-  }
-
-  .doc-header {
-    grid-column: 1 / -1;
-  }
-
-  .tabs {
-    grid-column: 1;
-    grid-row: 2;
-    display: grid !important;
-    gap: 8px !important;
-    border-bottom: 0 !important;
-    overflow: visible !important;
-    position: sticky;
-    top: 20px;
-  }
-
-  .tab {
-    width: 100%;
-    justify-content: flex-start;
-    gap: 10px;
-    border: 1px solid ${line};
-    border-radius: 14px;
-    margin-bottom: 0;
-    padding: 16px 18px;
-    background: #fff;
-    /* the base 14px is sized for the compact horizontal underline row —
-       inside these roomy sidebar cards it reads undersized */
-    font-size: 15.5px;
-  }
-
-  .tab svg {
-    width: 20px;
-    height: 20px;
-  }
-
-  .tab.active {
-    border-color: ${moss};
-    border-bottom-color: ${moss};
-    background: #f0f5f1;
-  }
-
-  .panel {
-    grid-column: 2;
-    grid-row: 2;
+    margin-left: auto;
+    margin-right: auto;
   }
 }
 
@@ -3588,10 +3524,6 @@ textarea:focus-visible,
 
   .tabs {
     gap: 0 !important;
-    margin-left: -16px !important;
-    margin-right: -16px !important;
-    padding-left: 16px !important;
-    padding-right: 16px !important;
     scrollbar-width: none;
   }
 
@@ -3601,7 +3533,7 @@ textarea:focus-visible,
 
   .tab {
     gap: 4px;
-    padding: 10px 7px 13px;
+    padding: 10px 6px 13px;
     font-size: 13px;
   }
 

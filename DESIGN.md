@@ -184,18 +184,22 @@ never guilt a learner over their own data.
 
 ### Lists & navigation
 
-- **Tabs** (`tabs`/`tab`): horizontal on mobile (scrollable, `border-bottom`
-  underline style), switches to a sticky vertical sidebar at ≥900px.
-  Active tab: `mossDeep` text, `moss` bottom border (or full border on
-  desktop), 600 weight.
+- **Tabs** (`tabs`/`tab`): one horizontal underline row at **every** width —
+  an explicit product decision; do not reintroduce the old ≥900px vertical
+  sidebar variant. The row is full-bleed (calc breakout:
+  `margin-left/right: calc(50% - 50vw)` with matching padding so labels stay
+  aligned to the content column) and distributes tabs with
+  `space-between`. Sizing: 15.5px labels / 20px icons; the ≤700px block
+  compacts to 13px / 15px with 6px side padding — tuned so all five tabs fit
+  a 390px viewport exactly (the row scrolls, scrollbar hidden, below that).
+  Active tab: `mossDeep` text, `moss` bottom border, 600 weight.
 - **History list** (`historyList`/`historyItem`): 6px row gap, each row a
   bordered card (see Cards above), hover border → `moss`. The grid track is
   `minmax(0, 1fr)` so long nowrap titles ellipsize instead of widening the
   track. On the upload screen it renders in two containers with CSS deciding
   which is visible: inline below the dropzone (default), or a left sidebar at
   ≥1100px (`.history-sidebar`, 300px column, full-height `1px line`
-  right divider, sticky scrollable body) — same Claude-style placement as the
-  study screen's ≥900px tab sidebar. While the first fetch after sign-in is
+  right divider, sticky scrollable body). While the first fetch after sign-in is
   in flight, show a small spinner row ("Loading your documents…",
   `.spinner-sm`, 18px) instead of nothing; once resolved with no documents,
   the whole section — sidebar and inline — disappears entirely. Never show an
@@ -310,14 +314,15 @@ added, extend this file with a real section following the same format
 Single-page app (upload → tabbed study screen), not a marketing site — no
 literal 12-column grid or hero-in-columns-2-8.
 
-- `@media (min-width: 900px)`: study screen becomes a two-column layout —
-  sticky tab sidebar (col 1) + panel (col 2).
+- The study screen keeps one stacked layout (header → full-bleed tab row →
+  panel) at **every** width; `@media (min-width: 900px)` only caps the
+  panel's reading measure (`.panel .fade` max-width 860px, centered).
 - `@media (min-width: 1100px)`: upload screen becomes a two-column layout —
   recent-documents sidebar (col 1, 300px) + centered hero/dropzone (col 2).
   Only when there's history (or it's still loading); with none, the hero
   stays centered full-width.
 - `@media (max-width: 700px)` / `(max-width: 420px)`: single-column,
-  full-bleed tabs, stacked hero.
+  compact tab sizing, stacked hero.
 - `@media (min-width: 760px)`: the weekly trend badge appears (hidden
   below that to keep the header from crowding on phones).
 - Section dividers are `1px solid line` everywhere, never a shadow.
