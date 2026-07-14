@@ -3483,11 +3483,20 @@ textarea:focus-visible,
   .tab {
     width: 100%;
     justify-content: flex-start;
+    gap: 10px;
     border: 1px solid ${line};
     border-radius: 14px;
     margin-bottom: 0;
-    padding: 14px 16px;
+    padding: 16px 18px;
     background: #fff;
+    /* the base 14px is sized for the compact horizontal underline row —
+       inside these roomy sidebar cards it reads undersized */
+    font-size: 15.5px;
+  }
+
+  .tab svg {
+    width: 20px;
+    height: 20px;
   }
 
   .tab.active {
