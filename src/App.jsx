@@ -3456,6 +3456,20 @@ textarea:focus-visible,
   .fc-card { transition: none; }
 }
 
+/* Tablet: same full-bleed idea as the mobile block below, scaled to this
+   range's own gutter (.study-wrap is min(1200px, 100vw - 56px), which
+   works out to a constant 28px side margin for any viewport under
+   1256px) — the tab row otherwise sits boxed in by that margin instead of
+   running edge to edge like it does on mobile. */
+@media (min-width: 701px) and (max-width: 899px) {
+  .tabs {
+    margin-left: -28px;
+    margin-right: -28px;
+    padding-left: 28px;
+    padding-right: 28px;
+  }
+}
+
 @media (min-width: 900px) {
   .panel .fade {
     max-width: 860px;
