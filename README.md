@@ -74,7 +74,7 @@ In Vercel: your project → **Settings → Environment Variables**:
 - `ENABLE_BROWSER_VOICE` — optional, defaults to `false`; the free browser-voice podcast player is hidden while the app is an early prototype. Set to `true` to bring it back, no code change needed.
 - `RESEND_API_KEY` / `FEEDBACK_EMAIL_TO` / `FEEDBACK_EMAIL_FROM` — optional; when the first two are set, "Give feedback" submissions are also emailed via [Resend](https://resend.com) in addition to being saved in Firestore. `FEEDBACK_EMAIL_FROM` defaults to Resend's shared sandbox sender.
 
-Then **redeploy** (Deployments → ⋯ → Redeploy) — env var changes only take effect on the next deployment. Verify at `https://<your-app>.vercel.app/api/health`: `gemini_key_configured` and `firebase_configured` should be `true`, and `tts_provider` shows which podcast voice backend is active. `elevenlabs_key_configured` only needs to be `true` if you set `TTS_PROVIDER=elevenlabs`.
+Then **redeploy** (Deployments → ⋯ → Redeploy) — env var changes only take effect on the next deployment. Verify by signing in and opening `https://<your-app>.vercel.app/api/status` (requires auth): `gemini_key_configured` and `firebase_configured` should be `true`, and `tts_provider` shows which podcast voice backend is active. `elevenlabs_key_configured` only needs to be `true` if you set `TTS_PROVIDER=elevenlabs`. (The public `/api/health` only reports liveness, so the detailed config isn't exposed to anonymous visitors.)
 
 ## Run locally
 
@@ -123,13 +123,14 @@ Then run the backend with `FIREBASE_PROJECT_ID=demo-study-app FIRESTORE_EMULATOR
 - `GET /api/documents` — the signed-in user's document history (up to 50, newest first; metadata and study data only).
 - `GET /api/documents/{id}` — one history document including its stored extracted text, used to re-enable Tutor chat when reopening.
 - `DELETE /api/documents/{id}` / `DELETE /api/documents` — delete one document or clear all history, including its cached audio, chat log and quiz attempts.
-- `POST /api/pdf/prepare` — extract, clean and chunk PDF text and return a Gemini-ready payload without calling Gemini. No sign-in needed.
+- `POST /api/pdf/prepare` — extract, clean and chunk PDF text and return a Gemini-ready payload without calling Gemini. Requires sign-in (PDF parsing is server compute, so it isn't left open to anonymous callers even though it costs no usage unit).
 - `POST /api/feedback` — submit `{rating: 1-5, comment, context}` from the "Give feedback" modal. Always saved to Firestore (`feedback` collection); also emailed via Resend when `RESEND_API_KEY` + `FEEDBACK_EMAIL_TO` are set (best-effort — a missing key or a failed send never blocks the submission). Storage only, no usage-limit cost.
-- `GET /api/health` — reports service status and whether Gemini, ElevenLabs and Firebase are configured, whether `ALLOWED_EMAILS` is restricting access, and whether the free browser-voice player is enabled (`browser_voice_enabled`, driven by `ENABLE_BROWSER_VOICE`).
+- `GET /api/health` — public liveness only (`{status, service, browser_voice_enabled}`); `browser_voice_enabled` is read by the signed-out frontend to know whether to show the free browser-voice player.
+- `GET /api/status` — authenticated deployment/config status (which providers are keyed, active `tts_provider`, `access_restricted`, `daily_usage_limit`). Kept off the public health endpoint so config isn't exposed to anonymous visitors.
 
 See [API_INTEGRATIONS.md](API_INTEGRATIONS.md) for exact prompts, file/line references, and request/response shapes for every endpoint above.
 
-All endpoints except `/api/pdf/prepare` and `/api/health` require an `Authorization: Bearer <Firebase ID token>` header.
+All endpoints except `/api/health` require an `Authorization: Bearer <Firebase ID token>` header.
 
 Example:
 
