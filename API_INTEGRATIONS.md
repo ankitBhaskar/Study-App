@@ -424,14 +424,15 @@ it only reports back whether the email attempt succeeded.
 
 | Method | Path | Auth | Handler | External API |
 |---|---|---|---|---|
-| GET | `/api/health` | none | `api/index.py:1260` | — (reports `tts_provider`, `browser_voice_enabled`) |
+| GET | `/api/health` | none | `api/index.py:1279` | — (public liveness only: `status`, `service`, `browser_voice_enabled`) |
+| GET | `/api/status` | required | `api/index.py:1293` | — (authed config status: providers keyed, `tts_provider`, `access_restricted`, `daily_usage_limit`) |
 | GET | `/api/profile` | required | `api/index.py:1278` | Firestore |
 | POST | `/api/feedback` | required | `api/index.py:1301` | Firestore, Resend (§5, best-effort) |
 | GET | `/api/documents` | required | `api/index.py:1325` | Firestore |
 | GET | `/api/documents/{doc_id}` | required | `api/index.py:1355` | Firestore |
 | DELETE | `/api/documents/{doc_id}` | required | `api/index.py:1391` | Firestore |
 | DELETE | `/api/documents` | required | `api/index.py:1400` | Firestore |
-| POST | `/api/pdf/prepare` | none | `api/index.py:1409` | — |
+| POST | `/api/pdf/prepare` | required | `api/index.py:1444` | — |
 | POST | `/api/pdf/analyze` | required | `api/index.py:1427` | Gemini, Firestore |
 | POST | `/api/chat` | required | `api/index.py:1505` | Gemini |
 | GET | `/api/documents/{doc_id}/chat` | required | `api/index.py:1539` | Firestore |

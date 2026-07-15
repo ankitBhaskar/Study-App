@@ -445,10 +445,12 @@ async def resolve_voice_ids(api_key: str) -> tuple[str, str]:
         try:
             response = await client.get(f"{ELEVENLABS_API_BASE}/voices", headers={"xi-api-key": api_key})
         except httpx.HTTPError as exc:
-            raise HTTPException(status_code=502, detail=f"Could not reach the ElevenLabs API: {exc}") from exc
+            _log_upstream("elevenlabs voices connection", exc)
+            raise HTTPException(status_code=502, detail="Could not reach the ElevenLabs service. Please try again.") from exc
 
     if response.status_code != 200:
-        raise HTTPException(status_code=502, detail=f"Could not list ElevenLabs voices ({response.status_code}).")
+        _log_upstream("elevenlabs voices", f"{response.status_code} {response.text[:500]}")
+        raise HTTPException(status_code=502, detail="Could not load ElevenLabs voices. Please try again.")
 
     voices = response.json().get("voices") or []
     if len(voices) < 2:
@@ -540,6 +542,14 @@ async def require_user(authorization: str | None = Header(default=None)) -> Auth
         raise HTTPException(status_code=403, detail="This app is invite-only. Contact the owner for access.")
 
     return AuthedUser(uid=decoded["uid"], email=email)
+
+
+def _log_upstream(context: str, detail: object) -> None:
+    """Record an upstream (Gemini/TTS/ElevenLabs) failure to the server logs
+    (captured by Vercel) without echoing the raw provider response — or a
+    connection error's internals — back to the client, where it's just free
+    reconnaissance. Clients get a generic 502 message instead."""
+    print(f"[upstream] {context}: {detail}", flush=True)
 
 
 def _today_key() -> str:
@@ -808,26 +818,46 @@ def list_cached_segment_indices(uid: str, doc_id: str, ns: str) -> list[int]:
     return sorted(indices)
 
 
-def check_usage_limit(uid: str) -> None:
+def reserve_usage(uid: str) -> None:
+    """Atomically claim one of the day's usage units, or raise 429 if the
+    limit is already reached. The read-and-increment runs inside a Firestore
+    transaction so concurrent requests can't each slip past a stale read and
+    overshoot the cap (the previous check-then-increment pair could).
+
+    A unit is consumed at admission — call this AFTER cache hits and cheap
+    validation (so those stay free), but before the paid Gemini/TTS work.
+    A request that fails downstream still counts, which also means a failing
+    call can't be retry-stormed for free."""
     db = get_firestore_client()
     if db is None:
         return
     usage_ref = db.collection("users").document(uid).collection("usage").document(_today_key())
-    snapshot = usage_ref.get()
-    current = (snapshot.to_dict() or {}).get("count", 0) if snapshot.exists else 0
-    if current >= DAILY_USAGE_LIMIT:
+
+    @firestore.transactional
+    def _claim(transaction) -> None:
+        snapshot = usage_ref.get(transaction=transaction)
+        current = (snapshot.to_dict() or {}).get("count", 0) if snapshot.exists else 0
+        if current >= DAILY_USAGE_LIMIT:
+            raise HTTPException(
+                status_code=429,
+                detail=f"You've used all {DAILY_USAGE_LIMIT} AI actions for today. Please try again tomorrow.",
+            )
+        transaction.set(usage_ref, {"count": current + 1, "date": _today_key()}, merge=True)
+
+    try:
+        # Extra retry headroom so a handful of parallel requests from one user
+        # (all contending on this single daily counter) still commit cleanly.
+        _claim(db.transaction(max_attempts=15))
+    except HTTPException:
+        raise
+    except ValueError:
+        # Transaction couldn't commit under heavy contention even after all
+        # retries. It failed closed (no unit granted, so the cap is never
+        # exceeded) — surface a retryable 429 rather than a raw 500.
         raise HTTPException(
             status_code=429,
-            detail=f"You've used all {DAILY_USAGE_LIMIT} AI actions for today. Please try again tomorrow.",
+            detail="Too many requests at once. Please try again in a moment.",
         )
-
-
-def increment_usage(uid: str) -> None:
-    db = get_firestore_client()
-    if db is None:
-        return
-    usage_ref = db.collection("users").document(uid).collection("usage").document(_today_key())
-    usage_ref.set({"count": firestore.Increment(1), "date": _today_key()}, merge=True)
 
 
 def clean_pdf_text(raw_text: str) -> str:
@@ -962,14 +992,16 @@ async def call_gemini(system_instruction: str, contents: list[dict[str, Any]], *
         try:
             response = await client.post(url, headers={"x-goog-api-key": api_key}, json=body)
         except httpx.HTTPError as exc:
-            raise HTTPException(status_code=502, detail=f"Could not reach the Gemini API: {exc}") from exc
+            _log_upstream("gemini generateContent connection", exc)
+            raise HTTPException(status_code=502, detail="Could not reach the Gemini service. Please try again.") from exc
 
     if response.status_code != 200:
         try:
             message = response.json()["error"]["message"]
         except Exception:
             message = response.text[:500]
-        raise HTTPException(status_code=502, detail=f"Gemini API error ({response.status_code}): {message}")
+        _log_upstream("gemini generateContent", f"{response.status_code} {message}")
+        raise HTTPException(status_code=502, detail="The Gemini service returned an error. Please try again.")
 
     data = response.json()
     try:
@@ -1259,8 +1291,24 @@ async def read_pdf_upload(file: UploadFile) -> ExtractedPdf:
 
 @app.get("/api/health")
 def health() -> dict[str, Any]:
+    # Public (pre-auth) endpoint — keep it to liveness plus the one config
+    # flag the signed-out frontend genuinely needs (browser_voice_enabled,
+    # read before login). The detailed provider/config status that used to
+    # live here is free recon for an attacker and now lives behind auth at
+    # /api/status.
     return {
         "status": "ok",
+        "service": APP_NAME,
+        "browser_voice_enabled": ENABLE_BROWSER_VOICE,
+    }
+
+
+@app.get("/api/status")
+def status(user: AuthedUser = Depends(require_user)) -> dict[str, Any]:
+    """Authenticated deployment/config status (which providers are keyed,
+    the active TTS backend, whether access is restricted). Kept off the
+    public /api/health so it isn't readable without a valid account."""
+    return {
         "service": APP_NAME,
         "gemini_model": GEMINI_MODEL,
         "gemini_key_configured": bool(get_gemini_api_key()),
@@ -1407,7 +1455,14 @@ async def clear_documents(user: AuthedUser = Depends(require_user)) -> dict[str,
 
 
 @app.post("/api/pdf/prepare", response_model=PdfProcessingResponse)
-async def prepare_pdf(file: UploadFile = File(...)) -> PdfProcessingResponse:
+async def prepare_pdf(
+    file: UploadFile = File(...),
+    # Requires auth even though it never calls Gemini: PDF parsing is CPU/
+    # memory work bounded only by maxDuration, so leaving it open let anyone
+    # burn serverless compute with crafted 4 MB PDFs. The app itself uploads
+    # to the authed /api/pdf/analyze, so gating this changes no real flow.
+    user: AuthedUser = Depends(require_user),
+) -> PdfProcessingResponse:
     extracted = await read_pdf_upload(file)
     chunks = chunk_text(extracted.text)
     payload = build_gemini_payload(file.filename or "uploaded-document.pdf", chunks)
@@ -1434,7 +1489,7 @@ async def analyze_pdf(
     summary_focus: str = Form(""),
     user: AuthedUser = Depends(require_user),
 ) -> StudyAnalysisResponse:
-    check_usage_limit(user.uid)
+    reserve_usage(user.uid)
 
     extracted = await read_pdf_upload(file)
     file_name = file.filename or "uploaded-document.pdf"
@@ -1463,7 +1518,6 @@ async def analyze_pdf(
     raw = parse_json_text(raw_text)
     title, summary, quiz, podcast = normalise_study_content(raw, file_name)
 
-    increment_usage(user.uid)
     db = get_firestore_client()
     document_id = None
     if db is not None:
@@ -1504,7 +1558,7 @@ async def analyze_pdf(
 
 @app.post("/api/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest, user: AuthedUser = Depends(require_user)) -> ChatResponse:
-    check_usage_limit(user.uid)
+    reserve_usage(user.uid)
 
     context = request.document_context.strip()[:MAX_GEMINI_CONTEXT_CHARS]
     if not context:
@@ -1532,7 +1586,6 @@ async def chat(request: ChatRequest, user: AuthedUser = Depends(require_user)) -
     contents.append({"role": "user", "parts": [{"text": question}]})
 
     answer = await call_gemini(system_instruction, contents, json_response=False)
-    increment_usage(user.uid)
     return ChatResponse(answer=answer.strip())
 
 
@@ -1585,7 +1638,7 @@ async def post_quiz_attempt(
 
 @app.post("/api/documents/{doc_id}/quiz/regenerate", response_model=QuizRegenerateResponse)
 async def regenerate_quiz(doc_id: str, user: AuthedUser = Depends(require_user)) -> QuizRegenerateResponse:
-    check_usage_limit(user.uid)
+    reserve_usage(user.uid)
 
     doc_ref, data = _get_document_or_404(user.uid, doc_id)
     context = _require_document_context(data, "quiz")
@@ -1622,7 +1675,6 @@ async def regenerate_quiz(doc_id: str, user: AuthedUser = Depends(require_user))
         raise HTTPException(status_code=502, detail="Gemini response did not include usable quiz questions.")
 
     doc_ref.update({"quiz": [q.model_dump() for q in quiz]})
-    increment_usage(user.uid)
     return QuizRegenerateResponse(quiz=quiz)
 
 
@@ -1634,7 +1686,7 @@ async def get_flashcard_sets(doc_id: str, user: AuthedUser = Depends(require_use
 
 @app.post("/api/documents/{doc_id}/flashcards/regenerate", response_model=FlashcardRegenerateResponse)
 async def regenerate_flashcards(doc_id: str, user: AuthedUser = Depends(require_user)) -> FlashcardRegenerateResponse:
-    check_usage_limit(user.uid)
+    reserve_usage(user.uid)
 
     _, data = _get_document_or_404(user.uid, doc_id)
     context = _require_document_context(data, "flashcard set")
@@ -1670,7 +1722,6 @@ async def regenerate_flashcards(doc_id: str, user: AuthedUser = Depends(require_
         raise HTTPException(status_code=502, detail="Gemini response did not include usable flashcards.")
 
     card_set = save_flashcard_set(user.uid, doc_id, cards)
-    increment_usage(user.uid)
     return FlashcardRegenerateResponse(set=card_set)
 
 
@@ -1697,7 +1748,7 @@ def _require_document_context(data: dict[str, Any], what: str) -> str:
 async def regenerate_summary(
     doc_id: str, request: SummaryRegenerateRequest, user: AuthedUser = Depends(require_user)
 ) -> SummaryRegenerateResponse:
-    check_usage_limit(user.uid)
+    reserve_usage(user.uid)
 
     doc_ref, data = _get_document_or_404(user.uid, doc_id)
     context = _require_document_context(data, "summary")
@@ -1724,7 +1775,6 @@ async def regenerate_summary(
         raise HTTPException(status_code=502, detail="Gemini response did not include a usable summary.")
 
     doc_ref.update({"summary": summary})
-    increment_usage(user.uid)
     return SummaryRegenerateResponse(summary=summary)
 
 
@@ -1764,7 +1814,7 @@ async def regenerate_podcast(
             podcast=podcast, podcast_style=style, saved_styles=sorted(versions), reused=True
         )
 
-    check_usage_limit(user.uid)
+    reserve_usage(user.uid)
     context = _require_document_context(data, "podcast script")
     contents = [
         {
@@ -1797,7 +1847,6 @@ async def regenerate_podcast(
 
     versions[style] = {**podcast.model_dump(), "audio_ns": style}
     doc_ref.update({"podcast": podcast.model_dump(), "podcast_style": style, "podcast_versions": versions})
-    increment_usage(user.uid)
     return PodcastRegenerateResponse(
         podcast=podcast, podcast_style=style, saved_styles=sorted(versions), reused=False
     )
@@ -1875,7 +1924,8 @@ async def elevenlabs_tts(text: str, speaker: int) -> tuple[bytes, str]:
                 },
             )
         except httpx.HTTPError as exc:
-            raise HTTPException(status_code=502, detail=f"Could not reach the ElevenLabs API: {exc}") from exc
+            _log_upstream("elevenlabs tts connection", exc)
+            raise HTTPException(status_code=502, detail="Could not reach the ElevenLabs service. Please try again.") from exc
 
     if response.status_code != 200:
         try:
@@ -1883,7 +1933,8 @@ async def elevenlabs_tts(text: str, speaker: int) -> tuple[bytes, str]:
             message = detail.get("message") if isinstance(detail, dict) else str(detail)
         except Exception:
             message = response.text[:300]
-        raise HTTPException(status_code=502, detail=f"ElevenLabs API error ({response.status_code}): {message}")
+        _log_upstream("elevenlabs tts", f"{response.status_code} {message}")
+        raise HTTPException(status_code=502, detail="The ElevenLabs service returned an error. Please try again.")
 
     return response.content, "audio/mpeg"
 
@@ -1914,14 +1965,16 @@ async def gemini_tts(text: str, speaker: int) -> tuple[bytes, str]:
         try:
             response = await client.post(url, headers={"x-goog-api-key": api_key}, json=body)
         except httpx.HTTPError as exc:
-            raise HTTPException(status_code=502, detail=f"Could not reach the Gemini API: {exc}") from exc
+            _log_upstream("gemini tts connection", exc)
+            raise HTTPException(status_code=502, detail="Could not reach the Gemini service. Please try again.") from exc
 
     if response.status_code != 200:
         try:
             message = response.json()["error"]["message"]
         except Exception:
             message = response.text[:500]
-        raise HTTPException(status_code=502, detail=f"Gemini TTS error ({response.status_code}): {message}")
+        _log_upstream("gemini tts", f"{response.status_code} {message}")
+        raise HTTPException(status_code=502, detail="The Gemini speech service returned an error. Please try again.")
 
     data = response.json()
     try:
@@ -2008,19 +2061,24 @@ async def _google_tts_request(text: str, audio_config: dict[str, Any]) -> bytes:
                 json=body,
             )
         except httpx.HTTPError as exc:
-            raise HTTPException(status_code=502, detail=f"Could not reach the Google TTS API: {exc}") from exc
+            _log_upstream("google tts connection", exc)
+            raise HTTPException(status_code=502, detail="Could not reach the Google TTS service. Please try again.") from exc
 
     if response.status_code != 200:
         try:
             message = response.json()["error"]["message"]
         except Exception:
             message = response.text[:500]
+        _log_upstream("google tts", f"{response.status_code} {message}")
         if response.status_code == 403 and "texttospeech.googleapis.com" in message:
-            message += (
-                " — enable the Cloud Text-to-Speech API for this key's Google Cloud project at "
-                "https://console.cloud.google.com/apis/library/texttospeech.googleapis.com"
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    "Google Cloud Text-to-Speech isn't enabled for this key's project. Enable it at "
+                    "https://console.cloud.google.com/apis/library/texttospeech.googleapis.com"
+                ),
             )
-        raise HTTPException(status_code=502, detail=f"Google TTS error ({response.status_code}): {message}")
+        raise HTTPException(status_code=502, detail="The Google TTS service returned an error. Please try again.")
 
     try:
         return base64.b64decode(response.json()["audioContent"])
@@ -2170,14 +2228,16 @@ async def gemini_tts_batch(
         try:
             response = await client.post(url, headers={"x-goog-api-key": api_key}, json=body)
         except httpx.HTTPError as exc:
-            raise HTTPException(status_code=502, detail=f"Could not reach the Gemini API: {exc}") from exc
+            _log_upstream("gemini tts connection", exc)
+            raise HTTPException(status_code=502, detail="Could not reach the Gemini service. Please try again.") from exc
 
     if response.status_code != 200:
         try:
             message = response.json()["error"]["message"]
         except Exception:
             message = response.text[:500]
-        raise HTTPException(status_code=502, detail=f"Gemini TTS error ({response.status_code}): {message}")
+        _log_upstream("gemini tts", f"{response.status_code} {message}")
+        raise HTTPException(status_code=502, detail="The Gemini speech service returned an error. Please try again.")
 
     data = response.json()
     try:
@@ -2223,7 +2283,7 @@ async def podcast_segment_audio(
             audio_bytes, mime = cached
             return Response(content=audio_bytes, media_type=mime)
 
-    check_usage_limit(user.uid)
+    reserve_usage(user.uid)
 
     text = request.text.strip()
     if not text:
@@ -2237,7 +2297,6 @@ async def podcast_segment_audio(
         audio_bytes, mime = await elevenlabs_tts(text, request.speaker)
         if has_cache_key:
             save_segment_audio(user.uid, request.document_id, ns, request.segment_index, audio_bytes, mime)
-        increment_usage(user.uid)
         return Response(content=audio_bytes, media_type=mime)
 
     # For a request tied to a saved document, generate many segments at once
@@ -2261,7 +2320,6 @@ async def podcast_segment_audio(
             save_segment_audio(user.uid, request.document_id, ns, index, seg_bytes, seg_mime)
             if index == request.segment_index:
                 requested = (seg_bytes, seg_mime)
-        increment_usage(user.uid)
         if requested is None:
             raise HTTPException(status_code=502, detail="Audio generation did not cover the requested segment.")
         audio_bytes, mime = requested
@@ -2275,7 +2333,6 @@ async def podcast_segment_audio(
         audio_bytes, mime = await google_tts(text)
     if has_cache_key:
         save_segment_audio(user.uid, request.document_id, ns, request.segment_index, audio_bytes, mime)
-    increment_usage(user.uid)
     return Response(content=audio_bytes, media_type=mime)
 
 
@@ -2310,8 +2367,7 @@ async def podcast_episode_audio(
     if not transcript:
         raise HTTPException(status_code=400, detail="This document has no podcast script to narrate.")
 
-    check_usage_limit(user.uid)
+    reserve_usage(user.uid)
     mp3 = await google_tts_episode_track(transcript)
     save_segment_audio(user.uid, request.document_id, ns, "full", mp3, "audio/mpeg")
-    increment_usage(user.uid)
     return Response(content=mp3, media_type="audio/mpeg")
