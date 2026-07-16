@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en-AU">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Study App Voice Lab</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="hero">
+        <p class="eyebrow">Study App experiment</p>
+        <h1>Voice Lab</h1>
+        <p class="subtitle">Compare Gemini, OpenAI and ElevenLabs voice output before choosing the production provider.</p>
+      </section>
+
+      <section class="panel">
+        <div class="grid">
+          <label>Provider
+            <select id="provider">
+              <option value="gemini">Gemini</option>
+              <option value="openai">OpenAI / ChatGPT</option>
+              <option value="elevenlabs">ElevenLabs</option>
+            </select>
+          </label>
+          <label>Voice
+            <input id="voice" placeholder="alloy, Kore, or ElevenLabs voice ID" />
+          </label>
+          <label>Speed
+            <input id="speed" type="number" min="0.5" max="2" step="0.1" value="1" />
+          </label>
+        </div>
+
+        <label>Test script
+          <textarea id="text" rows="8">Welcome to the Study App voice test. This page helps compare Gemini, OpenAI and ElevenLabs before we choose the final podcast voice provider.</textarea>
+        </label>
+
+        <div class="actions">
+          <button id="generate">Generate selected voice</button>
+          <button id="compare" class="secondary">Compare all three</button>
+          <button id="sample" class="ghost">Load study sample</button>
+        </div>
+
+        <p id="count" class="muted">0 characters</p>
+        <p id="error" class="error" hidden></p>
+      </section>
+
+      <section class="results">
+        <article class="card" data-provider="gemini"><h2>Gemini</h2><p class="status">Not tested</p><audio controls></audio><dl></dl></article>
+        <article class="card" data-provider="openai"><h2>OpenAI / ChatGPT</h2><p class="status">Not tested</p><audio controls></audio><dl></dl></article>
+        <article class="card" data-provider="elevenlabs"><h2>ElevenLabs</h2><p class="status">Not tested</p><audio controls></audio><dl></dl></article>
+      </section>
+    </main>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>
