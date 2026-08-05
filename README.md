@@ -25,7 +25,20 @@ A React/Vite study app that turns an uploaded PDF into a study workflow: Gemini-
 ```text
 Study-App/
 ├── api/
-│   └── index.py          # FastAPI app, deployed as a Vercel Python function
+│   ├── index.py          # Vercel entry point — re-exports the FastAPI app below
+│   └── study_app/        # The actual FastAPI app, split into small modules
+│       ├── factory.py    # Creates the FastAPI app, mounts every router
+│       ├── config.py     # Env vars / tunable limits
+│       ├── models.py     # Pydantic request/response schemas
+│       ├── auth.py       # require_user dependency (Firebase ID token + allowlist)
+│       ├── firebase_client.py
+│       ├── gemini_client.py
+│       ├── study_prompts.py / study_parsing.py
+│       ├── pdf_processing.py
+│       ├── notifications.py
+│       ├── storage/      # Firestore reads/writes (documents, quiz, flashcards, audio cache, usage)
+│       ├── tts/          # Google / Gemini / ElevenLabs text-to-speech providers
+│       └── routes/       # One file per resource (health, pdf, chat, quiz, flashcards, summary, podcast, ...)
 ├── src/
 │   ├── App.jsx
 │   ├── firebase.js        # Firebase client SDK init (Auth)
@@ -42,7 +55,7 @@ Study-App/
 
 ## Deploy on Vercel
 
-The repo is zero-config for Vercel: the Vite frontend is built as static assets and `api/index.py` is deployed as a Python serverless function handling all `/api/*` routes.
+The repo is zero-config for Vercel: the Vite frontend is built as static assets and `api/index.py` (which re-exports the FastAPI app assembled in `api/study_app/`) is deployed as a Python serverless function handling all `/api/*` routes.
 
 ### 1. Create a Firebase project
 
