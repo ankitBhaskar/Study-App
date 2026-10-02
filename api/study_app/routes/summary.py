@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from ..auth import require_user
 from ..gemini_client import call_gemini, parse_json_text
 from ..models import AuthedUser, SummaryRegenerateRequest, SummaryRegenerateResponse
+from ..prompt_safety import frame_untrusted_document, sanitize_label
 from ..storage.documents import _get_document_or_404, _require_document_context
 from ..storage.usage import reserve_usage
 from ..study_parsing import parse_summary_points
@@ -25,16 +26,19 @@ async def regenerate_summary(
     context = _require_document_context(data, "summary")
 
     length = request.length if request.length in SUMMARY_LENGTHS else "concise"
+    # Further hardened inside build_summary_system_instruction() ->
+    # _summary_instruction_line() via sanitize_label() — this is just the
+    # existing input-bounding step at the API boundary.
     focus = request.focus.strip()[:200]
+    file_name = sanitize_label(data.get("file_name"), 200) or "uploaded-document.pdf"
     contents = [
         {
             "role": "user",
             "parts": [
                 {
                     "text": (
-                        f"File name: {data.get('file_name', 'uploaded-document.pdf')}\n\n"
-                        "Document content:\n\n"
-                        f"{context}"
+                        f"File name: {file_name}\n\n"
+                        f"{frame_untrusted_document(context)}"
                     )
                 }
             ],

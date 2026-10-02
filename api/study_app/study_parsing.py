@@ -115,7 +115,9 @@ def parse_image_notes(raw: dict[str, Any]) -> dict[str, str]:
     return notes
 
 
-def normalise_study_content(raw: dict[str, Any], file_name: str) -> tuple[str, list[str], list[QuizQuestion], Podcast]:
+def normalise_study_content(
+    raw: dict[str, Any], file_name: str
+) -> tuple[str, list[str], list[QuizQuestion], Podcast, list[Flashcard]]:
     title = str(raw.get("title") or file_name)
 
     summary = parse_summary_points(raw.get("summary"))
@@ -130,4 +132,9 @@ def normalise_study_content(raw: dict[str, Any], file_name: str) -> tuple[str, l
     if podcast is None:
         raise HTTPException(status_code=502, detail="Gemini response did not include a usable podcast script.")
 
-    return title, summary, quiz, podcast
+    # Unlike summary/quiz/podcast, a missing or malformed flashcard set
+    # doesn't fail the whole analysis — the flashcards tab already has a
+    # working "Generate flashcards" fallback for an empty set.
+    flashcards = parse_flashcards(raw.get("flashcards") or {}) or []
+
+    return title, summary, quiz, podcast, flashcards

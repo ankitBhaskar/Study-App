@@ -15,6 +15,8 @@ from ..firebase_client import get_firestore_client
 from ..gemini_client import call_gemini, parse_json_text
 from ..models import AuthedUser, PdfProcessingResponse, StudyAnalysisResponse
 from ..pdf_processing import build_gemini_payload, chunk_text, read_pdf_upload, read_uploads
+from ..prompt_safety import frame_untrusted_document
+from ..storage.flashcard_sets import save_flashcard_set
 from ..storage.usage import reserve_usage
 from ..study_parsing import normalise_study_content, parse_image_notes
 from ..study_prompts import PODCAST_STYLES, SUMMARY_LENGTHS, build_study_system_instruction
@@ -82,7 +84,7 @@ async def analyze_pdf(
         {
             "text": (
                 f"Source file names: {', '.join(file_names)}\n\n"
-                + (f"Extracted text content:\n\n{context}\n\n" if context else "")
+                + (f"{frame_untrusted_document(context)}\n\n" if context else "")
                 + (f"{len(images)} image source(s) follow as attachments." if images else "")
             )
         }
@@ -105,7 +107,7 @@ async def analyze_pdf(
     )
     raw_text = await call_gemini(system_instruction, contents, json_response=True)
     raw = parse_json_text(raw_text)
-    title, summary, quiz, podcast = normalise_study_content(raw, file_name)
+    title, summary, quiz, podcast, flashcards = normalise_study_content(raw, file_name)
 
     # Raw image bytes are never stored or re-sent — Gemini's own transcription
     # of each image (imageNotes) is folded into the text context instead, so
@@ -146,6 +148,10 @@ async def analyze_pdf(
             }
         )
         document_id = doc_ref.id
+        # Loads by default on the Flashcards tab, same as summary/quiz/podcast
+        # — no separate "Generate flashcards" click needed for the first set.
+        if flashcards:
+            save_flashcard_set(user.uid, document_id, flashcards)
 
     return StudyAnalysisResponse(
         file_name=file_name,

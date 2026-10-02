@@ -8,6 +8,7 @@ from ..auth import require_user
 from ..config import MAX_AVOID_CARDS
 from ..gemini_client import call_gemini, parse_json_text
 from ..models import AuthedUser, FlashcardRegenerateResponse, FlashcardSetListResponse
+from ..prompt_safety import frame_untrusted_document, sanitize_label
 from ..storage.documents import _get_document_or_404, _require_document_context
 from ..storage.flashcard_sets import list_flashcard_sets, save_flashcard_set
 from ..storage.usage import reserve_usage
@@ -39,6 +40,7 @@ async def regenerate_flashcards(doc_id: str, user: AuthedUser = Depends(require_
                 avoid.append(card.front)
     avoid = avoid[:MAX_AVOID_CARDS]
     avoid_block = "\n".join(f"- {front}" for front in avoid) if avoid else "(none yet)"
+    file_name = sanitize_label(data.get("file_name"), 200) or "uploaded-document.pdf"
 
     contents = [
         {
@@ -46,10 +48,9 @@ async def regenerate_flashcards(doc_id: str, user: AuthedUser = Depends(require_
             "parts": [
                 {
                     "text": (
-                        f"File name: {data.get('file_name', 'uploaded-document.pdf')}\n\n"
+                        f"File name: {file_name}\n\n"
                         f"Card fronts already used (avoid repeating these or close variants):\n{avoid_block}\n\n"
-                        "Document content:\n\n"
-                        f"{context}"
+                        f"{frame_untrusted_document(context)}"
                     )
                 }
             ],

@@ -21,6 +21,7 @@ from .config import (
     MAX_TOTAL_UPLOAD_BYTES,
 )
 from .models import ExtractedPdf, ExtractedSource, GeminiPayload, PdfChunk
+from .prompt_safety import sanitize_label
 
 
 def clean_pdf_text(raw_text: str) -> str:
@@ -179,7 +180,11 @@ async def read_uploads(files: list[UploadFile]) -> list[ExtractedSource]:
     total_bytes = 0
 
     for file in files:
-        name = file.filename or "uploaded-file"
+        # File names are attacker-controlled free text that ends up stored
+        # and re-interpolated into a prompt on every later chat/regenerate
+        # call for this document — sanitize once, here, rather than at each
+        # of those call sites.
+        name = sanitize_label(file.filename, 200) or "uploaded-file"
         file_bytes = await file.read()
         if not file_bytes:
             raise HTTPException(status_code=400, detail=f'"{name}" is empty.')

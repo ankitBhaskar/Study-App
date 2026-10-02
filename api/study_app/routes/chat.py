@@ -11,6 +11,7 @@ from ..config import MAX_GEMINI_CONTEXT_CHARS, MAX_STORED_CHAT_MESSAGES, MAX_STO
 from ..firebase_client import get_firestore_client
 from ..gemini_client import call_gemini
 from ..models import AuthedUser, ChatLogRequest, ChatLogResponse, ChatMessage, ChatRequest, ChatResponse
+from ..prompt_safety import frame_untrusted_document, sanitize_label
 from ..storage.usage import reserve_usage
 from ..utils import truncate_utf8
 
@@ -40,13 +41,18 @@ async def chat(request: ChatRequest, user: AuthedUser = Depends(require_user)) -
     if not question:
         raise HTTPException(status_code=400, detail="Question must not be empty.")
 
+    # file_name is client-supplied free text (it round-trips through the
+    # browser with every chat call) and context may itself contain text
+    # pulled from an adversarial document — neither is trustworthy input to
+    # a systemInstruction, so both get the same hardening applied at upload
+    # time (see pdf_processing.read_uploads / prompt_safety.py).
+    file_name = sanitize_label(request.file_name, 200) or "uploaded-document.pdf"
     system_instruction = (
         "You are a friendly study tutor. Answer questions using ONLY the uploaded document below. "
         "If a question cannot be answered from the document, reply: "
         "'Please ask a question related to the uploaded PDF.' Keep answers concise and clear.\n\n"
-        f"File name: {request.file_name}\n\n"
-        "Document content:\n\n"
-        f"{context}"
+        f"File name: {file_name}\n\n"
+        f"{frame_untrusted_document(context)}"
     )
 
     contents: list[dict[str, Any]] = []

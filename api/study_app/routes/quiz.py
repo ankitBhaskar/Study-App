@@ -8,6 +8,7 @@ from ..auth import require_user
 from ..config import MAX_AVOID_QUESTIONS
 from ..gemini_client import call_gemini, parse_json_text
 from ..models import AuthedUser, QuizAttempt, QuizAttemptListResponse, QuizAttemptRequest, QuizRegenerateResponse
+from ..prompt_safety import frame_untrusted_document, sanitize_label
 from ..storage.documents import _get_document_or_404, _require_document_context
 from ..storage.quiz_attempts import list_quiz_attempts, save_quiz_attempt
 from ..storage.usage import reserve_usage
@@ -50,6 +51,7 @@ async def regenerate_quiz(doc_id: str, user: AuthedUser = Depends(require_user))
                 avoid.append(q.q)
     avoid = avoid[:MAX_AVOID_QUESTIONS]
     avoid_block = "\n".join(f"- {q}" for q in avoid) if avoid else "(none yet)"
+    file_name = sanitize_label(data.get("file_name"), 200) or "uploaded-document.pdf"
 
     contents = [
         {
@@ -57,10 +59,9 @@ async def regenerate_quiz(doc_id: str, user: AuthedUser = Depends(require_user))
             "parts": [
                 {
                     "text": (
-                        f"File name: {data.get('file_name', 'uploaded-document.pdf')}\n\n"
+                        f"File name: {file_name}\n\n"
                         f"Questions already used (avoid repeating these or close variants):\n{avoid_block}\n\n"
-                        "Document content:\n\n"
-                        f"{context}"
+                        f"{frame_untrusted_document(context)}"
                     )
                 }
             ],

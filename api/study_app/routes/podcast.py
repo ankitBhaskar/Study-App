@@ -20,6 +20,7 @@ from ..models import (
     PodcastRegenerateResponse,
     SegmentAudioRequest,
 )
+from ..prompt_safety import frame_untrusted_document, sanitize_label
 from ..storage.audio_cache import (
     _active_audio_ns,
     _audio_collection_ref,
@@ -70,15 +71,15 @@ async def regenerate_podcast(
 
     reserve_usage(user.uid)
     context = _require_document_context(data, "podcast script")
+    file_name = sanitize_label(data.get("file_name"), 200) or "uploaded-document.pdf"
     contents = [
         {
             "role": "user",
             "parts": [
                 {
                     "text": (
-                        f"File name: {data.get('file_name', 'uploaded-document.pdf')}\n\n"
-                        "Document content:\n\n"
-                        f"{context}"
+                        f"File name: {file_name}\n\n"
+                        f"{frame_untrusted_document(context)}"
                     )
                 }
             ],
