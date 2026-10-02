@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import {
   ArrowRight,
+  Camera,
   Check,
   Clock,
   FileText,
@@ -32,6 +33,7 @@ import {
 } from "firebase/auth";
 import ReactMarkdown from "react-markdown";
 import { auth, googleProvider } from "./firebase";
+import { MAX_UPLOAD_FILES, PICKER_ACCEPT, prepareUploadFiles, summarizeFileNames } from "./uploadPrep";
 
 // Gemini output often contains markdown (bold, bullet lists, etc.) — render
 // it instead of showing literal asterisks. react-markdown renders straight
@@ -64,35 +66,6 @@ function Markdown({ children }) {
 // In production the API is served by Vercel functions on the same origin;
 // in local dev the FastAPI server runs separately on port 8000.
 const API_BASE = import.meta.env.VITE_API_URL || (import.meta.env.DEV ? "http://localhost:8000" : "");
-
-// Vercel serverless functions reject bodies over ~4.5 MB — this caps every
-// selected file's COMBINED size, not each file individually, matching the
-// backend's MAX_TOTAL_UPLOAD_BYTES.
-const MAX_UPLOAD_BYTES = 4 * 1024 * 1024;
-const MAX_UPLOAD_FILES = 5;
-const ACCEPTED_FILE_EXTENSIONS = [".pdf", ".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif"];
-const ACCEPTED_FILE_TYPES = [
-  "application/pdf",
-  "image/jpeg",
-  "image/png",
-  "image/webp",
-  "image/heic",
-  "image/heif",
-];
-const ACCEPT_ATTR = [...ACCEPTED_FILE_EXTENSIONS, ...ACCEPTED_FILE_TYPES].join(",");
-
-function isAcceptedFile(file) {
-  const type = (file.type || "").toLowerCase();
-  const name = (file.name || "").toLowerCase();
-  return ACCEPTED_FILE_TYPES.includes(type) || ACCEPTED_FILE_EXTENSIONS.some((ext) => name.endsWith(ext));
-}
-
-// Mirrors the backend's file_name summary so the UI shows the same label
-// before and after the upload completes.
-function summarizeFileNames(names) {
-  if (names.length <= 1) return names[0] || "";
-  return `${names[0]} +${names.length - 1} more`;
-}
 
 const MOCK = {
   title: "Chapter 6 — Memory & Learning",
@@ -642,29 +615,20 @@ export default function StudyMVP() {
       return;
     }
 
-    if (files.length > MAX_UPLOAD_FILES) {
-      setError(`You can upload up to ${MAX_UPLOAD_FILES} files at a time.`);
-      return;
-    }
-    const unsupported = files.find((f) => !isAcceptedFile(f));
-    if (unsupported) {
-      setError(`"${unsupported.name}" isn't a supported file type. Upload PDFs or images (JPEG, PNG, WEBP, HEIC).`);
-      return;
-    }
-    const totalBytes = files.reduce((sum, f) => sum + f.size, 0);
-    if (totalBytes > MAX_UPLOAD_BYTES) {
-      setError("These files are too large together. Maximum combined size is 4 MB.");
-      return;
-    }
-
     setFileName(summarizeFileNames(files.map((f) => f.name)));
     setLoading(true);
     try {
+      // Validates type/count/size and shrinks large photos to JPEG first.
+      const prepared = await prepareUploadFiles(files);
       const form = new FormData();
-      for (const f of files) form.append("files", f);
+      for (const f of prepared) form.append("files", f);
       const res = await authedFetch("/api/pdf/analyze", { method: "POST", body: form });
       const data = await res.json().catch(() => null);
       if (!res.ok) {
+        // Vercel's own body-size rejection has no JSON detail.
+        if (res.status === 413 && !data?.detail) {
+          throw new Error("These files are too large to upload together (4 MB limit). Try fewer files.");
+        }
         throw new Error(data?.detail || `The study service returned an error (${res.status}).`);
       }
       setDoc({
@@ -887,6 +851,15 @@ function HistoryPanel({ history, historyLoading, onOpenHistory, onDeleteHistory,
 
 function UploadScreen({ loading, onUpload, fileRef, error, history, historyLoading, onOpenHistory, onDeleteHistory, onClearHistory }) {
   const [drag, setDrag] = useState(false);
+  const cameraRef = useRef(null);
+  // Phones/tablets: no drag-and-drop, but a camera. `capture` is ignored on
+  // desktop, so the camera button is only shown where it does something.
+  const [isTouch] = useState(() => typeof window !== "undefined" && !!window.matchMedia?.("(pointer: coarse)").matches);
+  const pickFiles = (e) => {
+    const picked = Array.from(e.target.files || []);
+    if (picked.length) onUpload(picked);
+    e.target.value = "";
+  };
   const hasHistoryPanel = historyLoading || history.length > 0;
   const historyPanel = (
     <HistoryPanel
@@ -943,37 +916,48 @@ function UploadScreen({ loading, onUpload, fileRef, error, history, historyLoadi
         }}
         role="button"
         tabIndex={0}
-        aria-label="Drop PDFs or images here or click to browse, up to 5 files, 4 MB total"
+        aria-label={
+          isTouch
+            ? `Choose up to ${MAX_UPLOAD_FILES} PDFs or photos, 4 MB total`
+            : `Drop PDFs or photos here or click to browse, up to ${MAX_UPLOAD_FILES} files, 4 MB total`
+        }
       >
-        <input
-          ref={fileRef}
-          type="file"
-          accept={ACCEPT_ATTR}
-          multiple
-          hidden
-          onChange={(e) => {
-            const picked = Array.from(e.target.files || []);
-            if (picked.length) onUpload(picked);
-            e.target.value = "";
-          }}
-        />
+        <input ref={fileRef} type="file" accept={PICKER_ACCEPT} multiple hidden onChange={pickFiles} />
         {loading ? (
           <div style={styles.loadingBox} role="status" aria-live="polite">
             <div className="spinner" aria-hidden="true" />
-            <p style={styles.loadingText}>Reading your document…</p>
-            <p style={styles.loadingSub}>Generating summary & quiz</p>
+            <p style={styles.loadingText}>Reading your files…</p>
+            <p style={styles.loadingSub}>Generating summary, quiz & flashcards</p>
           </div>
         ) : (
           <>
             <div style={styles.uploadIcon}>
               <Upload size={26} strokeWidth={2} />
             </div>
-            <p style={styles.dropTitle}>Drop PDFs or photos here</p>
-            <p style={styles.dropSub}>or click to browse · PDF, slides, photos of notes · up to 5 files</p>
-            <p style={styles.dropLimit}>Max combined size: 4 MB</p>
+            <p style={styles.dropTitle}>{isTouch ? "Tap to add PDFs or photos" : "Drop PDFs or photos here"}</p>
+            <p style={styles.dropSub}>
+              {isTouch ? "From your files or photo library" : "or click to browse · PDFs, slides, photos of notes"}
+            </p>
+            <p style={styles.dropLimit}>Up to {MAX_UPLOAD_FILES} files · 4 MB total · large photos are shrunk automatically</p>
           </>
         )}
       </div>
+
+      {isTouch && !loading && (
+        <>
+          <input
+            ref={cameraRef}
+            type="file"
+            accept="image/*"
+            capture="environment"
+            hidden
+            onChange={pickFiles}
+          />
+          <button type="button" style={styles.cameraBtn} onClick={() => cameraRef.current?.click()}>
+            <Camera size={16} /> Take a photo of your notes
+          </button>
+        </>
+      )}
 
       {!loading && error && <p style={styles.errorText} role="alert">{error}</p>}
 
@@ -2723,6 +2707,23 @@ const styles = {
   headerRight: { display: "flex", alignItems: "center", gap: 10 },
   usageBadge: { ...pillBadge },
   trendBadge: { ...pillBadge, alignItems: "center", gap: 5, fontWeight: 600 },
+  cameraBtn: {
+    marginTop: 16,
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+    background: "#fff",
+    border: `1.5px solid ${moss}`,
+    color: mossDeep,
+    borderRadius: 12,
+    padding: "11px 20px",
+    minHeight: 44,
+    fontSize: 15,
+    fontWeight: 600,
+    cursor: "pointer",
+    fontFamily: "inherit",
+  },
   sampleBtn: {
     marginTop: 22,
     display: "inline-flex",
