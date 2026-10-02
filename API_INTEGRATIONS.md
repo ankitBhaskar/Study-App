@@ -63,42 +63,60 @@ prompts, so a chosen style/length reads consistently either way.
 
 **Handler:** `api/study_app/routes/pdf_routes.py` · **Frontend:** `src/App.jsx:329`
 
-Multipart form: `file: UploadFile` (PDF ≤4 MB, `read_pdf_upload()` at `api/study_app/pdf_processing.py`)
-plus optional `podcast_style` / `summary_length` / `summary_focus` Form fields and the
-`Authorization` header.
+Multipart form: `files: list[UploadFile]` — repeat the `files` field once per file, 1–5 files,
+≤4 MB combined (`read_uploads()` at `api/study_app/pdf_processing.py`), any mix of PDFs and
+JPEG/PNG/WEBP/HEIC images — plus optional `podcast_style` / `summary_length` / `summary_focus`
+Form fields and the `Authorization` header.
 
 **Prompt** built by `build_study_system_instruction()` (`api/study_app/study_prompts.py`) — a single
-JSON-shaped instruction producing `title` + `summary` + `quiz` + `podcastScript`, with the
-summary/podcast guidance lines swapped in from §1.2, including the line:
+JSON-shaped instruction producing `title` + `summary` + `quiz` + `podcastScript` (+ `imageNotes`
+when any image sources are present), with the summary/podcast guidance lines swapped in from
+§1.2, including the line:
 
 ```
 Keep the combined spoken text of all podcast segments under 4500 characters total — write shorter, punchier lines rather than fewer segments.
 ```
 
-**User content:**
+**User content** — one multimodal turn: a leading text part with the file names and every PDF
+source's extracted text (concatenated, each under an `=== Source: {name} ===` header, combined
+truncated to `MAX_GEMINI_CONTEXT_CHARS` = 400,000 chars, `api/study_app/config.py`), then one
+`{"text": "=== Source: {name} (image) ==="}` + `{"inlineData": {"mimeType", "data": base64}}`
+pair per image — Gemini reads the image bytes directly, no OCR step:
 
 ```
-File name: {file_name}
+Source file names: notes.pdf, photo.jpg
 
-Extracted PDF content:
+Extracted text content:
 
-{context}   # extracted text, truncated to MAX_GEMINI_CONTEXT_CHARS = 400,000 chars (`api/study_app/config.py`)
+=== Source: notes.pdf ===
+{pdf text}
+
+2 image source(s) follow as attachments.
+```
+```
+=== Source: photo.jpg (image) ===
+<inlineData: image/jpeg, base64>
 ```
 
 Called at `api/study_app/routes/pdf_routes.py`. Normalised by `normalise_study_content()`
 (`api/study_app/study_parsing.py`) via `parse_summary_points()` (`api/study_app/study_parsing.py`),
 `parse_quiz_questions()` (`api/study_app/study_parsing.py`), `parse_podcast_script()` (`api/study_app/study_parsing.py`,
-see §1.8 for the character-cap enforcement).
+see §1.8 for the character-cap enforcement). When images were sent, `parse_image_notes()`
+(`api/study_app/study_parsing.py`) pulls Gemini's own transcription of each image out of the
+response and folds it into the text that gets stored/returned as `document_context` — raw image
+bytes are never stored or re-sent, so this transcription is the only record later text-only
+calls (tutor chat, regenerate-*) have of an image's content.
 
 **Output — `StudyAnalysisResponse`, `api/study_app/models.py`:**
 
 ```json
 {
-  "file_name": "string", "page_count": 0, "title": "string",
+  "file_name": "string (one name, or \"first.pdf +2 more\")", "file_names": ["string"],
+  "page_count": 0, "title": "string",
   "summary": ["string"],
   "quiz": [ { "q": "string", "options": ["string"], "answer": 0, "topic": "string", "explanation": "string" } ],
   "podcast": { "duration": "10:00", "hosts": ["name"], "transcript": [ { "t": "0:00", "who": "name", "line": "string" } ] },
-  "document_context": "string (echoed extracted text)",
+  "document_context": "string (extracted PDF text + Gemini's image transcriptions, combined)",
   "document_id": "string | null"
 }
 ```
@@ -370,7 +388,7 @@ the Gemini call, not the Firestore write). Client: `get_firestore_client()`
 
 | Path | Written by | File/line | Contents |
 |---|---|---|---|
-| `documents/{doc_id}` | `analyze_pdf()` | `api/study_app/routes/pdf_routes.py` | `title`, `file_name`, `summary`, `quiz`, `podcast` (active script), `podcast_style` (active style), `podcast_versions` (`{style: script + audio_ns}` — every generated style version, ≤4,500 chars each, reused on style switch per §1.7), `document_context` (≤`MAX_STORED_CONTEXT_BYTES` = 900 KB, `api/study_app/config.py`), `created_at`. `summary`/`quiz` are overwritten in place by §1.5–1.6 |
+| `documents/{doc_id}` | `analyze_pdf()` | `api/study_app/routes/pdf_routes.py` | `title`, `file_name` (joined summary), `file_names` (one entry per uploaded source), `summary`, `quiz`, `podcast` (active script), `podcast_style` (active style), `podcast_versions` (`{style: script + audio_ns}` — every generated style version, ≤4,500 chars each, reused on style switch per §1.7), `document_context` (PDF text + image transcriptions combined, ≤`MAX_STORED_CONTEXT_BYTES` = 900 KB, `api/study_app/config.py`), `created_at`. `summary`/`quiz` are overwritten in place by §1.5–1.6 |
 | `documents/{doc_id}/audio/{style}.{segment_index}` | `save_segment_audio()` | `api/study_app/storage/audio_cache.py` | `{ "data": "<base64 audio>", "mime": "audio/wav" \| "audio/mpeg", "chunks": N }` — one doc per segment plus a `{style}.full` sentinel doc holding the single continuous MP3 episode track (§2.1), **namespaced per podcast style** (`_audio_doc_id()`, `api/study_app/storage/audio_cache.py`) so every generated style keeps its own audio; pre-versioning audio lives under plain integer IDs (the `"legacy"` namespace, still served). Audio over `MAX_CACHED_AUDIO_BYTES` = 740 KB raw (`api/study_app/config.py`) is split across sibling chunk docs `….c{n}` (`{ "data": ... }` only) and reassembled on read by `get_cached_segment_audio()` (`api/study_app/storage/audio_cache.py`); a missing chunk reads as a cache miss. Fresh regeneration of a style clears only that style's namespace (§1.7); document deletion drops the whole subcollection |
 | `documents/{doc_id}/chat/log` | `save_chat_log()` | `api/study_app/routes/chat.py` | `{ "messages": [...] }` — last `MAX_STORED_CHAT_MESSAGES` = 60, each text ≤`MAX_STORED_CHAT_TEXT_BYTES` = 10 KB (`api/study_app/config.py`) |
 | `documents/{doc_id}/quiz_attempts/{auto_id}` | `save_quiz_attempt()` | `api/study_app/storage/quiz_attempts.py` | `{ questions, answers, score, total, created_at }` — score computed server-side; capped at `MAX_QUIZ_ATTEMPTS` = 20 (`api/study_app/config.py`) |

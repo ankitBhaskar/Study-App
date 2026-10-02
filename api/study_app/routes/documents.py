@@ -22,7 +22,7 @@ async def list_documents(user: AuthedUser = Depends(require_user)) -> DocumentLi
         .collection("documents")
         # Field mask keeps the potentially-large document_context out of the
         # list query; it's fetched per-document via GET /api/documents/{id}.
-        .select(["title", "file_name", "created_at", "summary", "quiz", "podcast"])
+        .select(["title", "file_name", "file_names", "created_at", "summary", "quiz", "podcast"])
         .order_by("created_at", direction=firestore.Query.DESCENDING)
         .limit(50)
     )
@@ -34,6 +34,7 @@ async def list_documents(user: AuthedUser = Depends(require_user)) -> DocumentLi
                 id=doc.id,
                 title=data.get("title", "Untitled"),
                 file_name=data.get("file_name", ""),
+                file_names=data.get("file_names", []),
                 created_at=data.get("created_at", ""),
                 summary=data.get("summary", []),
                 quiz=[QuizQuestion(**q) for q in data.get("quiz", [])],
@@ -54,6 +55,7 @@ async def get_document(doc_id: str, user: AuthedUser = Depends(require_user)) ->
         id=snapshot.id,
         title=data.get("title", "Untitled"),
         file_name=data.get("file_name", ""),
+        file_names=data.get("file_names", []),
         created_at=data.get("created_at", ""),
         summary=data.get("summary", []),
         quiz=[QuizQuestion(**q) for q in data.get("quiz", [])],

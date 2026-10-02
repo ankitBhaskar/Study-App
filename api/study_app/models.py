@@ -37,6 +37,21 @@ class ExtractedPdf:
     text: str
 
 
+@dataclass(frozen=True)
+class ExtractedSource:
+    """One file from a multi-file /api/pdf/analyze upload, after ingestion:
+    either PDF text or raw image bytes ready to send to Gemini as an inline
+    part. Images carry no extracted text of their own — Gemini transcribes
+    them as part of the analysis call (see study_prompts.build_study_system_instruction)."""
+
+    name: str
+    kind: str  # "pdf" | "image"
+    page_count: int
+    text: str = ""
+    image_bytes: bytes = b""
+    mime: str = ""
+
+
 class QuizQuestion(BaseModel):
     q: str
     options: list[str]
@@ -59,6 +74,10 @@ class Podcast(BaseModel):
 
 class StudyAnalysisResponse(BaseModel):
     file_name: str
+    # Every uploaded source's original name, in upload order. file_name above
+    # is a human-readable summary ("notes.pdf" or "notes.pdf +2 more") kept
+    # for the UI surfaces that only show one name.
+    file_names: list[str] = []
     page_count: int
     title: str
     summary: list[str]
@@ -221,6 +240,7 @@ class DocumentRecord(BaseModel):
     id: str
     title: str
     file_name: str
+    file_names: list[str] = []
     created_at: str
     summary: list[str]
     quiz: list[QuizQuestion]

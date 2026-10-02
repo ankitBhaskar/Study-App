@@ -47,9 +47,29 @@ def _summary_instruction_line(length: str, focus: str) -> str:
     return line
 
 
-def build_study_system_instruction(podcast_style: str, summary_length: str, summary_focus: str) -> str:
+def build_study_system_instruction(
+    podcast_style: str, summary_length: str, summary_focus: str, has_images: bool = False
+) -> str:
     summary_line = _summary_instruction_line(summary_length, summary_focus)
     podcast_line = PODCAST_STYLE_GUIDANCE.get(podcast_style, PODCAST_STYLE_GUIDANCE["conversation"])
+    # Image sources have no extracted text of their own — Gemini reads the
+    # attached image parts directly, and imageNotes is how its reading of
+    # them comes back as text, so it can be folded into the stored
+    # document_context for later tutor chat / regeneration calls (which are
+    # text-only and never re-sent the original images).
+    image_notes_schema = (
+        ""
+        if not has_images
+        else ',\n  "imageNotes": [\n    {"source": "image file name, exactly as given", "notes": "transcription + description"}\n  ]'
+    )
+    image_notes_instruction = (
+        ""
+        if not has_images
+        else (
+            "\nFor each image source, add one entry to imageNotes so a text-only reader could reconstruct its "
+            "key content: transcribe any visible text verbatim and describe diagrams, charts or handwriting."
+        )
+    )
     return f"""You are an expert study assistant. Use ONLY the uploaded document content provided by the user.
 Create study material and return a single JSON object with EXACTLY this shape (no markdown, no extra keys):
 {{
@@ -72,12 +92,13 @@ Create study material and return a single JSON object with EXACTLY this shape (n
     "segments": [
       {{"timestamp": "0:00", "speaker": "name", "line": "spoken line"}}
     ]
-  }}
+  }}{image_notes_schema}
 }}
 Summary instructions: {summary_line}
 Podcast instructions: {podcast_line} Create 8 to 12 podcast segments with timestamps spread between 0:00 and 9:30 in mm:ss format.
 Keep the combined spoken text of all podcast segments under {MAX_PODCAST_SCRIPT_CHARS} characters total — write shorter, punchier lines rather than fewer segments.
-Create 3 to 5 quiz questions. Everything must be grounded in the document content."""
+Create 3 to 5 quiz questions. Everything must be grounded in the document content, which may span multiple PDF
+and image sources provided together — treat them as one combined document.{image_notes_instruction}"""
 
 
 def build_summary_system_instruction(length: str, focus: str) -> str:

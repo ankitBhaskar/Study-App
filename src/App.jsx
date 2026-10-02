@@ -61,8 +61,34 @@ function Markdown({ children }) {
 // in local dev the FastAPI server runs separately on port 8000.
 const API_BASE = import.meta.env.VITE_API_URL || (import.meta.env.DEV ? "http://localhost:8000" : "");
 
-// Vercel serverless functions reject bodies over ~4.5 MB.
+// Vercel serverless functions reject bodies over ~4.5 MB — this caps every
+// selected file's COMBINED size, not each file individually, matching the
+// backend's MAX_TOTAL_UPLOAD_BYTES.
 const MAX_UPLOAD_BYTES = 4 * 1024 * 1024;
+const MAX_UPLOAD_FILES = 5;
+const ACCEPTED_FILE_EXTENSIONS = [".pdf", ".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif"];
+const ACCEPTED_FILE_TYPES = [
+  "application/pdf",
+  "image/jpeg",
+  "image/png",
+  "image/webp",
+  "image/heic",
+  "image/heif",
+];
+const ACCEPT_ATTR = [...ACCEPTED_FILE_EXTENSIONS, ...ACCEPTED_FILE_TYPES].join(",");
+
+function isAcceptedFile(file) {
+  const type = (file.type || "").toLowerCase();
+  const name = (file.name || "").toLowerCase();
+  return ACCEPTED_FILE_TYPES.includes(type) || ACCEPTED_FILE_EXTENSIONS.some((ext) => name.endsWith(ext));
+}
+
+// Mirrors the backend's file_name summary so the UI shows the same label
+// before and after the upload completes.
+function summarizeFileNames(names) {
+  if (names.length <= 1) return names[0] || "";
+  return `${names[0]} +${names.length - 1} more`;
+}
 
 const MOCK = {
   title: "Chapter 6 — Memory & Learning",
@@ -593,10 +619,13 @@ export default function StudyMVP() {
     }
   };
 
-  const startUpload = async (file) => {
+  // files is a File[] — one or more PDFs/images picked from the web file
+  // dialog, dragged onto the dropzone, or chosen via a mobile browser's
+  // picker (camera roll, Files app, etc.). null means "sample mode."
+  const startUpload = async (files) => {
     setError("");
 
-    if (!file) {
+    if (!files || files.length === 0) {
       // Sample mode: show bundled demo content without hitting the backend.
       setFileName("psychology-ch6.pdf");
       setLoading(true);
@@ -609,16 +638,26 @@ export default function StudyMVP() {
       return;
     }
 
-    if (file.size > MAX_UPLOAD_BYTES) {
-      setError("PDF is too large. Maximum supported size is 4 MB.");
+    if (files.length > MAX_UPLOAD_FILES) {
+      setError(`You can upload up to ${MAX_UPLOAD_FILES} files at a time.`);
+      return;
+    }
+    const unsupported = files.find((f) => !isAcceptedFile(f));
+    if (unsupported) {
+      setError(`"${unsupported.name}" isn't a supported file type. Upload PDFs or images (JPEG, PNG, WEBP, HEIC).`);
+      return;
+    }
+    const totalBytes = files.reduce((sum, f) => sum + f.size, 0);
+    if (totalBytes > MAX_UPLOAD_BYTES) {
+      setError("These files are too large together. Maximum combined size is 4 MB.");
       return;
     }
 
-    setFileName(file.name);
+    setFileName(summarizeFileNames(files.map((f) => f.name)));
     setLoading(true);
     try {
       const form = new FormData();
-      form.append("file", file);
+      for (const f of files) form.append("files", f);
       const res = await authedFetch("/api/pdf/analyze", { method: "POST", body: form });
       const data = await res.json().catch(() => null);
       if (!res.ok) {
@@ -887,8 +926,8 @@ function UploadScreen({ loading, onUpload, fileRef, error, history, historyLoadi
         onDrop={(e) => {
           e.preventDefault();
           setDrag(false);
-          const f = e.dataTransfer.files?.[0];
-          if (f) onUpload(f);
+          const picked = Array.from(e.dataTransfer.files || []);
+          if (picked.length) onUpload(picked);
         }}
         onClick={() => !loading && fileRef.current?.click()}
         onKeyDown={(e) => {
@@ -900,16 +939,17 @@ function UploadScreen({ loading, onUpload, fileRef, error, history, historyLoadi
         }}
         role="button"
         tabIndex={0}
-        aria-label="Drop a PDF here or click to browse, max file size 4 MB"
+        aria-label="Drop PDFs or images here or click to browse, up to 5 files, 4 MB total"
       >
         <input
           ref={fileRef}
           type="file"
-          accept=".pdf,application/pdf"
+          accept={ACCEPT_ATTR}
+          multiple
           hidden
           onChange={(e) => {
-            const f = e.target.files?.[0];
-            if (f) onUpload(f);
+            const picked = Array.from(e.target.files || []);
+            if (picked.length) onUpload(picked);
             e.target.value = "";
           }}
         />
@@ -924,9 +964,9 @@ function UploadScreen({ loading, onUpload, fileRef, error, history, historyLoadi
             <div style={styles.uploadIcon}>
               <Upload size={26} strokeWidth={2} />
             </div>
-            <p style={styles.dropTitle}>Drop a PDF here</p>
-            <p style={styles.dropSub}>or click to browse · PDF, slides, notes</p>
-            <p style={styles.dropLimit}>Max file size: 4 MB</p>
+            <p style={styles.dropTitle}>Drop PDFs or photos here</p>
+            <p style={styles.dropSub}>or click to browse · PDF, slides, photos of notes · up to 5 files</p>
+            <p style={styles.dropLimit}>Max combined size: 4 MB</p>
           </>
         )}
       </div>

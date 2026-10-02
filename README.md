@@ -9,7 +9,7 @@ A React/Vite study app that turns an uploaded PDF into a study workflow: Gemini-
 - Per-user daily usage limit on AI actions (analyze / chat / audio), enforced server-side
 - Document history stored per-account in Firestore (title, summary, quiz, podcast script and the extracted text — never the PDF file itself) with reopen/delete/clear-all; Tutor chat works on reopened documents
 - Responsive document upload screen with drag-and-drop interaction
-- Real PDF upload → Gemini analysis producing summary, quiz and podcast script
+- Upload up to 5 files at once — any mix of PDFs and photos (JPEG/PNG/WEBP/HEIC) of notes or slides, from a desktop file picker, drag-and-drop, or a mobile browser's camera roll — analyzed together by Gemini into one summary, quiz and podcast script
 - Interactive quiz with scoring and weak-topic feedback; generate a fresh, non-repeating set of questions on demand, and every attempt is saved so past scores and answers can be reviewed later
 - Summary can be regenerated with a different length (concise/detailed) or focused on a specific topic in the document
 - Podcast player with generated transcript; regenerate the script in a different style (two-host conversation, solo narrator, or interview) at any time
@@ -122,7 +122,7 @@ Then run the backend with `FIREBASE_PROJECT_ID=demo-study-app FIRESTORE_EMULATOR
 
 ## API endpoints
 
-- `POST /api/pdf/analyze` — upload a PDF, get Gemini-generated study content (title, summary, quiz, podcast script) plus the extracted `document_context` used for tutor chat, and save the derived data to the signed-in user's Firestore history. Optional form fields choose the initial generation style: `podcast_style` (`conversation` default / `solo` / `interview`), `summary_length` (`concise` default / `detailed`), `summary_focus` (free text, optional). Requires sign-in and `GEMINI_API_KEY`; counts against the daily usage limit.
+- `POST /api/pdf/analyze` — upload 1–5 files (any mix of PDFs and JPEG/PNG/WEBP/HEIC images, repeat the `files` form field once per file) and get Gemini-generated study content (title, summary, quiz, podcast script) plus the combined `document_context` used for tutor chat, and save the derived data to the signed-in user's Firestore history. Optional form fields choose the initial generation style: `podcast_style` (`conversation` default / `solo` / `interview`), `summary_length` (`concise` default / `detailed`), `summary_focus` (free text, optional). Requires sign-in and `GEMINI_API_KEY`; counts against the daily usage limit once per request regardless of file count.
 - `POST /api/chat` — ask the tutor a question scoped to the uploaded document (`{document_context, file_name, question, history}`). Requires sign-in and `GEMINI_API_KEY`; counts against the daily usage limit.
 - `GET`/`PUT /api/documents/{id}/chat` — read or save the tutor chat transcript for a document, so it's restored on the next visit. Storage only, no usage-limit cost.
 - `GET /api/documents/{id}/quiz/attempts` / `POST /api/documents/{id}/quiz/attempts` — list past quiz attempts (score, questions, answers; newest first, capped at 20) or record a new one. Score is computed server-side. Storage only, no usage-limit cost.
@@ -150,7 +150,8 @@ Example:
 ```bash
 curl -X POST "https://<your-app>.vercel.app/api/pdf/analyze" \
   -H "Authorization: Bearer $ID_TOKEN" \
-  -F "file=@sample.pdf"
+  -F "files=@sample.pdf" \
+  -F "files=@notes-photo.jpg"
 ```
 
 ## Gemini contract
@@ -159,10 +160,11 @@ The expected Gemini output shape is documented in `gemini_response_contract.json
 
 ## Notes
 
-- Upload limit is 4 MB — Vercel serverless functions reject larger request bodies.
+- Upload limit is 4 MB combined across every file in one request (not 4 MB each) — Vercel serverless functions reject larger request bodies — and up to 5 files at a time.
+- Images (JPEG, PNG, WEBP, HEIC) are sent straight to Gemini's vision model — no OCR step. Gemini's own transcription of each image is folded into the stored document text, so Tutor chat and "regenerate" actions keep working on image-sourced content without the original image ever being re-sent or stored.
 - Serverless functions keep no state between requests, so the browser holds the extracted document text and sends it with each tutor-chat message.
-- Document history stores the derived study data plus the extracted text (truncated to fit Firestore's 1 MiB document cap) — the PDF file itself is never stored. All four tabs, including Tutor chat, work when reopening a document from history. Documents analyzed before text storage was added show a re-upload notice in the Tutor tab.
-- Scanned (image-only) PDFs need OCR first; the API returns a clear error for them.
+- Document history stores the derived study data plus the extracted/transcribed text (truncated to fit Firestore's 1 MiB document cap) — the uploaded files themselves are never stored. All four tabs, including Tutor chat, work when reopening a document from history. Documents analyzed before text storage was added show a re-upload notice in the Tutor tab.
+- A scanned (image-only) PDF — a PDF with no text layer, as opposed to a standalone image file — still needs OCR first; the API returns a clear error for it, since only separate image uploads get Gemini's vision treatment.
 - There's no public email/password sign-up form — those accounts are created manually in the Firebase Console (Authentication → Users). Google sign-in is the self-service path instead: it creates a new Firebase account automatically on first login. Either way, `ALLOWED_EMAILS` (if set) is the real access control, enforced server-side — Google sign-in doesn't bypass it.
 - If a signed-in account isn't on `ALLOWED_EMAILS`, every API call returns 403 and the frontend immediately signs them out with a clear message rather than leaving them stuck in a broken logged-in state.
 - Without a key configured, the corresponding feature returns a clear "not configured" error rather than failing silently; the sample-document demo mode never needs any key and works for anyone signed in.

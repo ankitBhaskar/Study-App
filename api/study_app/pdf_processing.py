@@ -10,8 +10,17 @@ import re
 from fastapi import HTTPException, UploadFile
 from pypdf import PdfReader
 
-from .config import DEFAULT_CHUNK_OVERLAP, DEFAULT_CHUNK_SIZE, GEMINI_MODEL, MAX_FILE_SIZE_BYTES
-from .models import ExtractedPdf, GeminiPayload, PdfChunk
+from .config import (
+    ALLOWED_IMAGE_CONTENT_TYPES,
+    ALLOWED_IMAGE_EXTENSIONS,
+    DEFAULT_CHUNK_OVERLAP,
+    DEFAULT_CHUNK_SIZE,
+    GEMINI_MODEL,
+    MAX_FILE_SIZE_BYTES,
+    MAX_FILES_PER_UPLOAD,
+    MAX_TOTAL_UPLOAD_BYTES,
+)
+from .models import ExtractedPdf, ExtractedSource, GeminiPayload, PdfChunk
 
 
 def clean_pdf_text(raw_text: str) -> str:
@@ -135,3 +144,78 @@ async def read_pdf_upload(file: UploadFile) -> ExtractedPdf:
             detail="No readable text was found. This may be a scanned PDF and may need OCR before Gemini processing.",
         )
     return extracted
+
+
+def _guess_image_mime(lower_name: str) -> str:
+    if lower_name.endswith((".jpg", ".jpeg")):
+        return "image/jpeg"
+    if lower_name.endswith(".png"):
+        return "image/png"
+    if lower_name.endswith(".webp"):
+        return "image/webp"
+    if lower_name.endswith(".heic"):
+        return "image/heic"
+    if lower_name.endswith(".heif"):
+        return "image/heif"
+    return "application/octet-stream"
+
+
+async def read_uploads(files: list[UploadFile]) -> list[ExtractedSource]:
+    """Validate and ingest a /api/pdf/analyze upload: any mix of PDFs and
+    images, up to MAX_FILES_PER_UPLOAD files and MAX_TOTAL_UPLOAD_BYTES
+    combined. PDFs are text-extracted here; images are kept as raw bytes for
+    the caller to send to Gemini as inline parts — Gemini reads them
+    directly, no OCR step needed."""
+    if not files:
+        raise HTTPException(status_code=400, detail="Please choose at least one file.")
+    if len(files) > MAX_FILES_PER_UPLOAD:
+        raise HTTPException(
+            status_code=400,
+            detail=f"You can upload up to {MAX_FILES_PER_UPLOAD} files at a time.",
+        )
+
+    max_mb = MAX_TOTAL_UPLOAD_BYTES // (1024 * 1024)
+    sources: list[ExtractedSource] = []
+    total_bytes = 0
+
+    for file in files:
+        name = file.filename or "uploaded-file"
+        file_bytes = await file.read()
+        if not file_bytes:
+            raise HTTPException(status_code=400, detail=f'"{name}" is empty.')
+
+        total_bytes += len(file_bytes)
+        if total_bytes > MAX_TOTAL_UPLOAD_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=f"These files are too large together. Up to {max_mb} MB total is supported.",
+            )
+
+        content_type = (file.content_type or "").lower()
+        lower_name = name.lower()
+        is_pdf = content_type in {"application/pdf", "application/x-pdf"} or lower_name.endswith(".pdf")
+        is_image = content_type in ALLOWED_IMAGE_CONTENT_TYPES or lower_name.endswith(ALLOWED_IMAGE_EXTENSIONS)
+
+        if is_pdf:
+            extracted = extract_pdf_text(file_bytes)
+            if not extracted.text:
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        f'No readable text was found in "{name}". This may be a scanned PDF and may need '
+                        "OCR before Gemini processing."
+                    ),
+                )
+            sources.append(
+                ExtractedSource(name=name, kind="pdf", page_count=extracted.page_count, text=extracted.text)
+            )
+        elif is_image:
+            mime = content_type if content_type in ALLOWED_IMAGE_CONTENT_TYPES else _guess_image_mime(lower_name)
+            sources.append(ExtractedSource(name=name, kind="image", page_count=1, image_bytes=file_bytes, mime=mime))
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail=f'"{name}" isn\'t a supported file type. Upload PDFs or images (JPEG, PNG, WEBP, HEIC).',
+            )
+
+    return sources

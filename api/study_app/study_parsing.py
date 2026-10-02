@@ -99,6 +99,22 @@ def parse_podcast_script(podcast_raw: dict[str, Any]) -> Podcast | None:
     return Podcast(duration=f"{duration_minutes}:00", hosts=hosts[:2], transcript=segments)
 
 
+def parse_image_notes(raw: dict[str, Any]) -> dict[str, str]:
+    """Map image source file name -> Gemini's transcription/description of
+    it. Raw image bytes aren't stored, so this is the only record of an
+    image's content available to later text-only calls (tutor chat,
+    regenerate-*)."""
+    notes: dict[str, str] = {}
+    for item in raw.get("imageNotes") or []:
+        if not isinstance(item, dict):
+            continue
+        source = str(item.get("source") or "").strip()
+        text = str(item.get("notes") or "").strip()
+        if source and text:
+            notes[source] = text
+    return notes
+
+
 def normalise_study_content(raw: dict[str, Any], file_name: str) -> tuple[str, list[str], list[QuizQuestion], Podcast]:
     title = str(raw.get("title") or file_name)
 

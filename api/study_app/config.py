@@ -11,7 +11,16 @@ load_dotenv()
 APP_NAME = "Study App API"
 # Vercel serverless functions reject request bodies over ~4.5 MB, so the
 # upload limit must stay below that even though Gemini could handle more.
+# Used by the single-file /api/pdf/prepare preview endpoint.
 MAX_FILE_SIZE_BYTES = 4 * 1024 * 1024
+# /api/pdf/analyze accepts several PDFs/images in one request, but they all
+# share the same multipart body, so this caps their COMBINED size rather
+# than each file individually — the Vercel body limit above applies to the
+# whole request either way.
+MAX_FILES_PER_UPLOAD = 5
+MAX_TOTAL_UPLOAD_BYTES = 4 * 1024 * 1024
+ALLOWED_IMAGE_CONTENT_TYPES = {"image/jpeg", "image/png", "image/webp", "image/heic", "image/heif"}
+ALLOWED_IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif")
 DEFAULT_CHUNK_SIZE = 6_000
 DEFAULT_CHUNK_OVERLAP = 600
 # A 4 MB text-based PDF rarely extracts to more than this; ~400k chars is
