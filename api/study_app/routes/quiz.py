@@ -5,10 +5,17 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException
 
 from ..auth import require_user
-from ..config import MAX_AVOID_QUESTIONS
+from ..config import MAX_AVOID_QUESTIONS, MAX_QUIZ_ATTEMPT_QUESTIONS
 from ..gemini_client import call_gemini, parse_json_text
-from ..models import AuthedUser, QuizAttempt, QuizAttemptListResponse, QuizAttemptRequest, QuizRegenerateResponse
-from ..prompt_safety import frame_untrusted_document, sanitize_label
+from ..models import (
+    AuthedUser,
+    QuizAttempt,
+    QuizAttemptListResponse,
+    QuizAttemptRequest,
+    QuizQuestion,
+    QuizRegenerateResponse,
+)
+from ..prompt_safety import format_untrusted_list, frame_untrusted_document, sanitize_label
 from ..storage.documents import _get_document_or_404, _require_document_context
 from ..storage.quiz_attempts import list_quiz_attempts, save_quiz_attempt
 from ..storage.usage import reserve_usage
@@ -29,9 +36,26 @@ async def post_quiz_attempt(
 ) -> QuizAttempt:
     if len(request.answers) != len(request.questions):
         raise HTTPException(status_code=400, detail="answers must have one entry per question.")
+    if len(request.questions) > MAX_QUIZ_ATTEMPT_QUESTIONS:
+        raise HTTPException(
+            status_code=400, detail=f"A quiz attempt can have at most {MAX_QUIZ_ATTEMPT_QUESTIONS} questions."
+        )
+    # The question text here is whatever the client sends, and it's stored
+    # and later fed back into the regenerate prompt's avoid-list — so bound
+    # it before storage (sanitized again at the point of use).
+    questions = [
+        QuizQuestion(
+            q=q.q[:1000],
+            options=[o[:500] for o in q.options[:10]],
+            answer=q.answer,
+            topic=q.topic[:100],
+            explanation=q.explanation[:2000],
+        )
+        for q in request.questions
+    ]
     # Storage only — recording a past attempt doesn't call any paid API, so
     # it doesn't touch the usage limit.
-    return save_quiz_attempt(user.uid, doc_id, request.questions, request.answers)
+    return save_quiz_attempt(user.uid, doc_id, questions, request.answers)
 
 
 @router.post("/api/documents/{doc_id}/quiz/regenerate", response_model=QuizRegenerateResponse)
@@ -49,8 +73,7 @@ async def regenerate_quiz(doc_id: str, user: AuthedUser = Depends(require_user))
         for q in attempt.questions:
             if q.q not in avoid:
                 avoid.append(q.q)
-    avoid = avoid[:MAX_AVOID_QUESTIONS]
-    avoid_block = "\n".join(f"- {q}" for q in avoid) if avoid else "(none yet)"
+    avoid_block = format_untrusted_list(avoid[:MAX_AVOID_QUESTIONS])
     file_name = sanitize_label(data.get("file_name"), 200) or "uploaded-document.pdf"
 
     contents = [

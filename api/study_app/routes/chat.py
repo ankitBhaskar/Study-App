@@ -7,7 +7,13 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException
 
 from ..auth import require_user
-from ..config import MAX_GEMINI_CONTEXT_CHARS, MAX_STORED_CHAT_MESSAGES, MAX_STORED_CHAT_TEXT_BYTES
+from ..config import (
+    MAX_CHAT_QUESTION_CHARS,
+    MAX_CHAT_TURN_CHARS,
+    MAX_GEMINI_CONTEXT_CHARS,
+    MAX_STORED_CHAT_MESSAGES,
+    MAX_STORED_CHAT_TEXT_BYTES,
+)
 from ..firebase_client import get_firestore_client
 from ..gemini_client import call_gemini
 from ..models import AuthedUser, ChatLogRequest, ChatLogResponse, ChatMessage, ChatRequest, ChatResponse
@@ -37,7 +43,7 @@ async def chat(request: ChatRequest, user: AuthedUser = Depends(require_user)) -
     if not context:
         raise HTTPException(status_code=400, detail="Document context is missing. Please upload the PDF again.")
 
-    question = request.question.strip()
+    question = request.question.strip()[:MAX_CHAT_QUESTION_CHARS]
     if not question:
         raise HTTPException(status_code=400, detail="Question must not be empty.")
 
@@ -55,10 +61,12 @@ async def chat(request: ChatRequest, user: AuthedUser = Depends(require_user)) -
         f"{frame_untrusted_document(context)}"
     )
 
+    # History only ever lands in user/model content turns, never in the
+    # systemInstruction, whatever role the client claims for it.
     contents: list[dict[str, Any]] = []
     for turn in request.history[-20:]:
         role = "user" if turn.role == "user" else "model"
-        text = turn.text.strip()
+        text = turn.text.strip()[:MAX_CHAT_TURN_CHARS]
         if text:
             contents.append({"role": role, "parts": [{"text": text}]})
     contents.append({"role": "user", "parts": [{"text": question}]})
